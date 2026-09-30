@@ -1,0 +1,36 @@
+# Базова конфігурація (за замовчуванням)
+
+map:
+  width: 30
+  height: 30
+  
+terrain:
+  obstacle_ratio: 0.2        # 20% препятствів
+  tree_ratio: 0.05           # 5% дерев
+  water_ratio: 0.03          # 3% води
+  mountain_ratio: 0.02       # 2% гір
+
+drone:
+  start_x: 15                # Центр
+  start_y: 15
+  start_z: 0                 # На землі
+  battery_capacity: 100      # % енергії
+  max_altitude: 20           # Максимум висота
+  
+physics:
+  energy_base_cost: 1.0      # % енергії за крок на землі
+  altitude_multiplier: true  # Енергія зростає з висотою
+  sensor_accuracy_decline: true  # Датчики менше точні на висоті
+  
+collision:
+  detection_enabled: true
+  tree_collision_damage: 30  # % пошкодження від гілок
+  obstacle_collision_damage: 100  # Крах о стіну
+
+observation:
+  radius: 2                  # 5×5 видимість
+  include_health: true       # Включити інформацію про здоров'я
+  
+episode:
+  max_steps: 1000
+  seed: 42                   # Для репродукованості

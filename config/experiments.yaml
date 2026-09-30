@@ -1,0 +1,82 @@
+# Три різні конфігурації складності
+
+configs:
+  
+  # КОНФІГУРАЦІЯ 1: ЛЕГКА
+  easy:
+    name: "Easy (20x20, 15% препятствів)"
+    map:
+      width: 20
+      height: 20
+    terrain:
+      obstacle_ratio: 0.15   # ← МЕНШЕ препятствів
+      tree_ratio: 0.02
+      water_ratio: 0.01
+      mountain_ratio: 0.01
+    drone:
+      battery_capacity: 150  # ← БІЛЬШЕ батареї
+    physics:
+      energy_base_cost: 0.8  # ← МЕНШЕ витрат
+    episode:
+      max_steps: 500
+      seed: 42
+  
+  # КОНФІГУРАЦІЯ 2: СЕРЕДНЯ
+  medium:
+    name: "Medium (30x30, 25% препятствів)"
+    map:
+      width: 30
+      height: 30
+    terrain:
+      obstacle_ratio: 0.25   # ← СЕРЕДНЯ
+      tree_ratio: 0.05
+      water_ratio: 0.03
+      mountain_ratio: 0.02
+    drone:
+      battery_capacity: 100  # ← СТАНДАРТНА
+    physics:
+      energy_base_cost: 1.0  # ← СТАНДАРТНА
+    episode:
+      max_steps: 1000
+      seed: 42
+  
+  # КОНФІГУРАЦІЯ 3: ВАЖКА
+  hard:
+    name: "Hard (50x50, 35% препятствів)"
+    map:
+      width: 50
+      height: 50
+    terrain:
+      obstacle_ratio: 0.35   # ← БІЛЬШЕ препятствів
+      tree_ratio: 0.10
+      water_ratio: 0.05
+      mountain_ratio: 0.05
+    drone:
+      battery_capacity: 80   # ← МЕНШЕ батареї
+    physics:
+      energy_base_cost: 1.2  # ← БІЛЬШЕ витрат
+    observation:
+      radius: 1              # ← МЕНША видимість (3×3)
+    episode:
+      max_steps: 2000
+      seed: 42
+
+# Експерименти
+experiments:
+  - name: "Experiment 1: Easy"
+    config: "easy"
+    runs: 20
+    seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+            52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
+  
+  - name: "Experiment 2: Medium"
+    config: "medium"
+    runs: 20
+    seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+            52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
+  
+  - name: "Experiment 3: Hard"
+    config: "hard"
+    runs: 20
+    seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+            52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
