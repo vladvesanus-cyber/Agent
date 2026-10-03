@@ -4,7 +4,7 @@ ExperimentRunner - запускає декілька симуляцій з рі�
 
 from typing import Dict, List
 from agents import AdaptiveHeightAgent
-from utils import ConfigLoader
+from config import ConfigLoader
 from .simulation import Simulator
 
 

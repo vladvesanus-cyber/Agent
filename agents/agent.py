@@ -1,312 +1,294 @@
 """
-Адаптивний агент що балансує висоту, ризик, час та якість
+AdaptiveHeightAgent - розумний агент що вчиться без знання про карту
 """
 
 import numpy as np
-from typing import Dict, Tuple
+import random
+from typing import Dict, Set, Tuple
 
 
 class AdaptiveHeightAgent:
     """
-    Розумний агент який:
-    1. Обирає оптимальну висоту на основі умов
-    2. Балансує ризик поломки та якість дослідження
-    3. Управляє часом та енергією
-    4. Оцінює якість отриманої карти
+    Агент що адаптивно дослідує невідому територію
+    Не знає розміри карти - вчиться на основі сенсорів і колізій
     """
     
-    def __init__(self, name: str = "AdaptiveHeightAgent"):
-        self.name = name
-        
-        # Внутрішній стан
-        self.world_map = {}
-        self.visited_cells = set()
-        self.frontier = set()
-        
-        # Параметри алгоритму
-        self.quality_threshold = 0.7
-        self.risk_tolerance = 0.5
-        
-        # Історія для навчання
-        self.decision_history = []
+    def __init__(self):
+        self.boundary_cells = set()  # Клітини де дрон ударився або виявив границю
+        self.safe_directions = {}     # Напрямки що не приводили до колізій
+        self.stuck_count = 0
+        self.last_position = None
     
     def decide(self, observation: Dict) -> Dict:
-        """
-        Прийняти рішення на основі багатьох факторів
-        """
+        """Розпізнати та повернути дію"""
         
-        # ===== КРОК 1: АНАЛІЗ ПОТОЧНОЇ СИТУАЦІЇ =====
-        situation = self._analyze_situation(observation)
+        try:
+            situation = self._analyze_situation(observation)
+            optimal_altitude = self._choose_altitude(situation)
+            next_move = self._choose_direction(observation, situation)
+            
+            self.last_position = observation['position']
+            
+            return {
+                'move': next_move,
+                'altitude': optimal_altitude
+            }
         
-        # ===== КРОК 2: ВИБІР ОПТИМАЛЬНОЇ ВИСОТИ =====
-        best_altitude = self._choose_optimal_altitude(situation)
-        
-        # ===== КРОК 3: ПЛАНУВАННЯ МАРШРУТУ =====
-        direction = self._plan_direction(observation, best_altitude, situation)
-        
-        # ===== КРОК 4: РІШЕННЯ СКАНУВАТИ =====
-        should_scan = self._should_scan(observation, situation)
-        
-        action = {
-            'move': (direction[0], direction[1], best_altitude - observation['position'][2]),
-            'scan': should_scan
-        }
-        
-        # Запам'ятати рішення
-        self.decision_history.append({
-            'altitude': best_altitude,
-            'direction': direction,
-            'scan': should_scan
-        })
-        
-        return action
-    
-    # ===== КРОК 1: АНАЛІЗ СИТУАЦІЇ =====
+        except Exception as e:
+            print(f"❌ ПОМИЛКА В АГЕНТІ: {e}")
+            raise
     
     def _analyze_situation(self, observation: Dict) -> Dict:
-        """
-        Повний аналіз поточної ситуації
-        """
+        """Проаналізувати ситуацію"""
         
         health = observation['health']
         position = observation['position']
+        local_map = observation['local_map']
+        
+        # ===== БАТАРЕЯ =====
         battery = health['battery']['charge_percent']
+        battery_temp = health['battery']['temperature']
         
+        # ===== МОТОРИ =====
+        motors = health['motors']
+        motor_health = np.mean([m['efficiency'] for m in motors])
+        motor_temp = np.mean([m['temperature'] for m in motors])
+        
+        # ===== ДАТЧИКИ =====
+        sensors = health['sensors']
+        sensor_accuracy = np.mean([s['accuracy'] for s in sensors])
+        sensor_dirt = np.mean([s['dirt_level'] for s in sensors])
+        
+        # ===== СТРУКТУРА =====
+        structure = health['structure']
+        integrity = structure['integrity']
+        is_flightworthy = structure['is_flightworthy']
+        
+        # ===== ЗАГАЛЬНЕ ЗДОРОВ'Я =====
         overall_health = health['overall_health']
-        motor_health = np.mean([m['efficiency'] for m in health['motors']])
-        sensor_accuracy = np.mean([s['accuracy'] for s in health['sensors']])
-        structure_integrity = health['structure']['integrity']
+        critical_alerts = health['critical_alerts']
         
-        # Відстань до дому
-        home_x, home_y = 15, 15
-        dist_to_home = abs(position[0] - home_x) + abs(position[1] - home_y)
-        
-        # Енергія для повернення
-        energy_needed_for_return = dist_to_home * 1.5
-        energy_safety_margin = battery - energy_needed_for_return
-        
-        # Критичність
-        is_critical = (
-            battery < 25 or
-            len(health['critical_alerts']) > 0 or
-            overall_health < 40
-        )
+        # ===== АНАЛІЗ ЛОКАЛЬНОЇ КАРТИ =====
+        local_obs = self._analyze_local_map(local_map, position)
         
         situation = {
-            'battery_percent': battery,
-            'energy_safety_margin': energy_safety_margin,
-            'is_critical': is_critical,
-            'overall_health': overall_health,
+            'battery': battery,
+            'battery_temp': battery_temp,
             'motor_health': motor_health,
+            'motor_temp': motor_temp,
             'sensor_accuracy': sensor_accuracy,
-            'structure_integrity': structure_integrity,
-            'distance_to_home': dist_to_home,
+            'sensor_dirt': sensor_dirt,
+            'structure_integrity': integrity,
+            'is_flightworthy': is_flightworthy,
+            'overall_health': overall_health,
+            'has_critical_alerts': len(critical_alerts) > 0,
+            'critical_alerts': critical_alerts,
+            'exploration': observation['exploration_ratio'],
             'position': position,
-            'critical_alerts': health['critical_alerts'],
-            'sensor_details': health['sensors'],
-            'motor_details': health['motors']
+            'local_map': local_map,
+            'local_obstacles': local_obs,
+            'current_altitude': position[2],
+            'step_count': observation['step_count']
         }
         
         return situation
     
-    # ===== КРОК 2: ВИБІР ВИСОТИ =====
+    def _analyze_local_map(self, local_map: np.ndarray, position: tuple) -> Dict:
+        """
+        Проаналізувати локальну карту
+        -1 = границя карти!
+        """
+        
+        has_water_below = False
+        has_obstacles_around = False
+        has_trees_around = False
+        boundary_directions = []  # Напрямки на границю
+        
+        center = local_map.shape[0] // 2
+        
+        # Перевіряємо всю локальну карту
+        for dy in range(-center, center+1):
+            for dx in range(-center, center+1):
+                y = center + dy
+                x = center + dx
+                
+                if 0 <= y < local_map.shape[0] and 0 <= x < local_map.shape[1]:
+                    cell = local_map[y, x]
+                    
+                    # ===== ГРАНИЦЯ КАРТИ =====
+                    if cell == -1:
+                        if dx != 0 or dy != 0:  # Не в центрі
+                            boundary_directions.append((dx, dy))
+                        continue
+                    
+                    cell = int(cell)
+                    
+                    # ===== ВОДА НИЖЧЕ =====
+                    if cell == 3 and dy == 0 and dx == 0:
+                        has_water_below = True
+                    
+                    # ===== ПЕРЕШКОДИ =====
+                    if cell == 1:  # OBSTACLE
+                        has_obstacles_around = True
+                    if cell == 2:  # TREE
+                        has_obstacles_around = True
+                        has_trees_around = True
+        
+        return {
+            'has_water_below': has_water_below,
+            'has_obstacles_around': has_obstacles_around,
+            'has_trees_around': has_trees_around,
+            'boundary_directions': boundary_directions
+        }
     
-    def _choose_optimal_altitude(self, situation: Dict) -> float:
+    def _choose_altitude(self, situation: Dict) -> float:
+        """Вибрати оптимальну висоту"""
+        
+        local_obs = situation['local_obstacles']
+        battery = situation['battery']
+        sensor_dirt = situation['sensor_dirt']
+        overall_health = situation['overall_health']
+        
+        # ===== КРИТИЧНІ УМОВИ =====
+        if overall_health < 40 or not situation['is_flightworthy']:
+            return 0.0
+        
+        # ===== ВОДА НИЖЧЕ =====
+        if local_obs['has_water_below']:
+            return 10.0
+        
+        # ===== ДАТЧИКИ ЗАБРУДНЕНІ =====
+        if sensor_dirt > 60:
+            return 10.0
+        elif sensor_dirt > 40:
+            return 8.0
+        
+        # ===== БАТАРЕЯ НИЗЬКА =====
+        if battery < 20:
+            return 2.0
+        
+        # ===== МОТОРИ ГАРЯЧІ =====
+        if situation['motor_temp'] > 60:
+            return 12.0
+        elif situation['motor_temp'] > 50:
+            return 9.0
+        
+        # ===== ДЕРЕВА НАВКОЛО =====
+        if local_obs['has_trees_around']:
+            return 7.0
+        
+        # ===== НОРМАЛЬНО =====
+        return 5.5
+    
+    def _choose_direction(self, observation: Dict, situation: Dict) -> tuple:
         """
-        Вибрати оптимальну висоту (0-20)
+        Вибрати напрямок руху
+        Уникати границь на основі локальної карти
         """
         
-        best_altitude = 0
-        best_score = -float('inf')
+        position = observation['position']
+        visited_cells = observation['visited_cells']
+        local_obs = situation['local_obstacles']
+        local_map = observation['local_map']
         
-        for test_altitude in range(0, 21):
-            score = self._evaluate_altitude(test_altitude, situation)
+        if not isinstance(visited_cells, set):
+            visited_cells = set()
+        
+        # ===== КРИТИЧНІ УМОВИ =====
+        if situation['overall_health'] < 40 or situation['battery'] < 15:
+            return self._go_away_direction(position)
+        
+        # ===== ВСІ НАПРЯМКИ =====
+        directions = [
+            (1, 0, 0),    # Вправо
+            (-1, 0, 0),   # Вліво
+            (0, 1, 0),    # Вниз
+            (0, -1, 0),   # Вгору
+        ]
+        
+        # ===== УНИКАТИ ГРАНИЦЬ НА ОСНОВІ ЛОКАЛЬНОЇ КАРТИ =====
+        valid_directions = []
+        center = local_map.shape[0] // 2
+        
+        for dx, dy, dz in directions:
+            # Перевірити що в цьому напрямку в локальній карті
+            local_x = center + dx
+            local_y = center + dy
+            
+            # Чи це границя карти?
+            if 0 <= local_x < local_map.shape[1] and 0 <= local_y < local_map.shape[0]:
+                cell_value = local_map[local_y, local_x]
+                if cell_value != -1:  # Не границя
+                    valid_directions.append((dx, dy, dz))
+            else:
+                # За межами локальної карти - це точно границя
+                pass
+        
+        # Якщо близько до границі - спробуємо відійти від найближчої границі
+        if not valid_directions:
+            # Вибрати напрямок з найменшою кількістю границь
+            return self._go_away_from_boundary(position, local_obs, local_map)
+        
+        # ===== ВИБРАТИ НАЙКРАЩИЙ НАПРЯМОК =====
+        best_direction = None
+        best_score = -1
+        
+        for dx, dy, dz in valid_directions:
+            new_x = position[0] + dx
+            new_y = position[1] + dy
+            cell_coord = (int(new_x), int(new_y))
+            
+            # Нові клітини - приоритет 100
+            if cell_coord not in visited_cells:
+                score = 100
+            else:
+                score = 10
             
             if score > best_score:
                 best_score = score
-                best_altitude = test_altitude
+                best_direction = (dx, dy, dz)
         
-        return float(best_altitude)
-    
-    def _evaluate_altitude(self, altitude: float, 
-                          situation: Dict) -> float:
-        """
-        Оцінити якість польоту на цій висоті (-100 до 100)
-        """
-        
-        # ===== ФАКТОР 1: ТОЧНІСТЬ ДАТЧИКІВ (30%) =====
-        sensor_accuracy_factor = max(0, 100 - (altitude ** 1.5) * 2)
-        sensor_score = sensor_accuracy_factor * 0.3
-        
-        # ===== ФАКТОР 2: РИЗИК ЗІТКНЕННЯ (20%) =====
-        collision_risk = 1 - (altitude / 20)
-        collision_score = (1 - collision_risk) * 0.2
-        
-        # ===== ФАКТОР 3: ЕНЕРГЕТИЧНА ВАРТІСТЬ (20%) =====
-        energy_cost = 1 + (altitude / 10) ** 2
-        energy_efficiency = 1 / energy_cost * 100
-        energy_score = energy_efficiency * 0.2
-        
-        # ===== ФАКТОР 4: ЗАБРУДНЕННЯ ДАТЧИКІВ (15%) =====
-        contamination_risk = max(0, (5 - altitude) * 0.2) if altitude < 5 else 0
-        contamination_score = (1 - contamination_risk) * 0.15
-        
-        # ===== ФАКТОР 5: БЕЗПЕКА ДРОНА (15%) =====
-        if situation['motor_health'] < 50:
-            altitude_safety_score = (altitude / 20) * 15
-        else:
-            altitude_safety_score = 0
-        
-        total_score = (
-            sensor_score +
-            collision_score +
-            energy_score +
-            contamination_score +
-            altitude_safety_score
-        )
-        
-        # ===== ШТРАФИ ЗА КРИТИЧНІ УМОВИ =====
-        if situation['is_critical']:
-            total_score += altitude * 0.5
-        
-        if situation['energy_safety_margin'] < 20:
-            total_score -= altitude * 0.3
-        
-        return total_score
-    
-    # ===== КРОК 3: ПЛАНУВАННЯ МАРШРУТУ =====
-    
-    def _plan_direction(self, observation: Dict, best_altitude: float, 
-                       situation: Dict) -> Tuple[int, int]:
-        """
-        Вибрати напрямок руху (dx, dy)
-        """
-        
-        # Якщо критично - йти додому
-        if situation['is_critical']:
-            return self._navigate_home(situation['position'])
-        
-        # Якщо мало енергії - почнемо повертатись
-        if situation['energy_safety_margin'] < 30:
-            return self._navigate_home(situation['position'])
-        
-        # Оцінити всі 4 напрямки
-        best_direction = (0, 0)
-        best_score = -float('inf')
-        
-        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        
-        for dx, dy in directions:
-            score = self._evaluate_direction(
-                (dx, dy),
-                observation,
-                situation,
-                best_altitude
-            )
-            
-            if score > best_score:
-                best_score = score
-                best_direction = (dx, dy)
+        if best_direction is None:
+            best_direction = random.choice(valid_directions) if valid_directions else (0, 0, 0)
         
         return best_direction
     
-    def _evaluate_direction(self, direction: Tuple[int, int], 
-                           observation: Dict, situation: Dict,
-                           altitude: float) -> float:
-        """
-        Оцінити якість руху в цьому напрямку (-100 до 100)
-        """
+    def _go_away_from_boundary(self, position: tuple, local_obs: Dict, local_map: np.ndarray) -> tuple:
+        """Рухатись ВІД найближчої границі"""
         
-        dx, dy = direction
-        new_x = situation['position'][0] + dx
-        new_y = situation['position'][1] + dy
+        center = local_map.shape[0] // 2
         
-        # ===== ФАКТОР 1: ДОСЛІДЖЕННЯ =====
-        is_new_cell = (new_x, new_y) not in self.visited_cells
-        exploration_score = 50 if is_new_cell else 10
+        # Знайти напрямки без границь
+        safe_directions = []
         
-        # ===== ФАКТОР 2: РИЗИК ЗІТКНЕННЯ =====
-        collision_risk = self._estimate_collision_risk(
-            new_x, new_y, altitude, observation
-        )
-        safety_score = (1 - collision_risk) * 30
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                    
+                local_x = center + dx
+                local_y = center + dy
+                
+                if (0 <= local_x < local_map.shape[1] and 
+                    0 <= local_y < local_map.shape[0]):
+                    cell = local_map[local_y, local_x]
+                    if cell != -1:  # Не границя
+                        safe_directions.append((dx, dy, 0))
         
-        # ===== ФАКТОР 3: ЯКІСТЬ ДОСЛІДЖЕННЯ =====
-        sensor_accuracy = max(0, 100 - (altitude ** 1.5) * 2)
-        quality_score = sensor_accuracy * 0.2
-        
-        # ===== ФАКТОР 4: ЕФЕКТИВНІСТЬ =====
-        if (new_x, new_y) in self.visited_cells:
-            efficiency_penalty = -20
+        if safe_directions:
+            return random.choice(safe_directions)
         else:
-            efficiency_penalty = 0
-        
-        total_score = (
-            exploration_score +
-            safety_score +
-            quality_score +
-            efficiency_penalty
-        )
-        
-        return total_score
+            # Останній засіб - літати вгору
+            return (0, 0, 1)
     
-    def _estimate_collision_risk(self, x: float, y: float, altitude: float,
-                                observation: Dict) -> float:
-        """
-        Оцінити ймовірність зіткнення (0-1)
-        """
+    def _go_away_direction(self, position: tuple) -> tuple:
+        """Напрямок ВІД границі - випадковий"""
         
-        if altitude > 10:
-            return 0.1
+        directions = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+        ]
         
-        local_map = observation['local_map']
-        
-        if self._is_obstacle_nearby(x, y, local_map):
-            collision_risk = 0.7
-        else:
-            collision_risk = 0.2
-        
-        altitude_factor = (5 - altitude) / 5 if altitude < 5 else 0
-        total_risk = min(1.0, collision_risk + altitude_factor)
-        
-        return total_risk
-    
-    def _is_obstacle_nearby(self, x: float, y: float, local_map) -> bool:
-        """Чи близько препятствие?"""
-        for dy in range(-1, 2):
-            for dx in range(-1, 2):
-                if local_map[dy + 2, dx + 2] != 0:
-                    return True
-        return False
-    
-    def _navigate_home(self, position: Tuple[float, float, float]) -> Tuple[int, int]:
-        """Направитись додому"""
-        x, y, z = position
-        home_x, home_y = 15, 15
-        
-        if abs(x - home_x) > abs(y - home_y):
-            return (1 if x < home_x else -1, 0)
-        else:
-            return (0, 1 if y < home_y else -1)
-    
-    # ===== КРОК 4: РІШЕННЯ СКАНУВАТИ =====
-    
-    def _should_scan(self, observation: Dict, situation: Dict) -> bool:
-        """
-        Чи варто сканувати на цьому кроці?
-        """
-        
-        if situation['is_critical'] or situation['energy_safety_margin'] < 40:
-            return False
-        
-        sensors = situation['sensor_details']
-        avg_accuracy = np.mean([s['accuracy'] for s in sensors])
-        avg_dirt = np.mean([s['dirt_level'] for s in sensors])
-        
-        if avg_dirt > 70:
-            return False
-        
-        if avg_accuracy < 50:
-            return False
-        
-        return situation['energy_safety_margin'] > 30
+        return random.choice(directions)

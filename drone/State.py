@@ -1,173 +1,444 @@
+"""
+Компоненти дрона: Battery, Motors, Sensors, Structure
+Кожен компонент має собственный reset() метод
+"""
+
+import numpy as np
+from typing import List, Dict
+
+
+# ===== БАТАРЕЯ =====
+
 class Battery:
-    def __init__(self, capacity: float):
+    """
+    Батарея дрона
+    Сповільнює роботу при розрядженні та деградує з часом
+    """
+    
+    def __init__(self, capacity: float = 100.0):
+        """
+        Args:
+            capacity: Ємність батареї (%)
+        """
+        
+        # Базові параметри
         self.capacity = capacity
-        self.charge = capacity
-        self.full_cycles = 0
-        self.temperature = 25.0
-        self.health = 100.0
-        self.ambient_temp = 25.0
+        self.max_capacity = capacity
+        
+        # Поточний стан
+        self.charge = capacity  # % заряду (0-100)
+        self.temperature = 25.0  # °C
+        self.health = 100.0  # % здоров'я батареї
+        
+        # Цикли розрядження
+        self.charge_cycles = 0
+        self.deep_discharge_count = 0
+        
+        # Історія
+        self.charge_history = [self.charge]
+        self.temperature_history = [self.temperature]
+        self.health_history = [self.health]
     
     def discharge(self, amount: float):
-        """Розраховує енергію за висоту"""
-        # Виправлено: discharges → discharge
+        """Розрядити батарею"""
         self.charge = max(0, self.charge - amount)
+        
+        # Історія
+        self.charge_history.append(self.charge)
+        
+        # Перевірити глибоку розрядку
+        if self.charge < 20:
+            self.deep_discharge_count += 1
     
-    def recharge(self):
-        self.charge = self.capacity
-        self.full_cycles += 1
-        self.update_health()
+    def recharge(self, amount: float):
+        """Зарядити батарею"""
+        self.charge = min(self.max_capacity, self.charge + amount)
+        self.charge_cycles += 1
+        self.charge_history.append(self.charge)
     
-    def get_remaining_range(self) -> float:
-        """Повертає % залишку батареї"""
-        return (self.charge / self.capacity) * 100
-    
-    def apply_thermal_stress(self, stress: float):
-        """Температура зростає з стресом, але охолоджується"""
-        self.temperature += stress
-        # Охолодження до навколишньої температури
-        cooling = (self.temperature - self.ambient_temp) * 0.05
-        self.temperature = max(self.ambient_temp, self.temperature - cooling)
+    def apply_thermal_stress(self, heat: float):
+        """Застосувати тепловий стрес"""
+        self.temperature += heat
+        self.temperature = min(60, self.temperature)  # Макс 60°C
     
     def update_health(self):
-        """Деградація від циклів та температури"""
-        cycle_degradation = min(50, self.full_cycles * 0.5)
-        temp_stress = max(0, (self.temperature - 40) * 0.2)
-        self.health = max(0, 100 - cycle_degradation - temp_stress)
+        """Оновити здоров'я батареї"""
+        # Деградація від циклів розрядження
+        cycles_degradation = self.charge_cycles * 0.1
+        
+        # Деградація від теплових циклів
+        if self.temperature > 40:
+            thermal_degradation = (self.temperature - 40) * 0.5
+        else:
+            thermal_degradation = 0
+        
+        # Деградація від глибоких розрядок
+        deep_degradation = self.deep_discharge_count * 0.2
+        
+        total_degradation = cycles_degradation + thermal_degradation + deep_degradation
+        self.health = max(0, 100 - total_degradation)
+        self.health_history.append(self.health)
     
     def is_healthy(self) -> bool:
-        return self.health > 20 and self.temperature < 50
+        """Чи батарея здорова?"""
+        return self.health > 50 and self.temperature < 50
+    
+    def get_remaining_range(self) -> float:
+        """Отримати % заряду"""
+        return self.charge
+    
+    def reset(self):
+        """
+        RESET батареї на початковий стан
+        Використовується коли дрон перезавантажується
+        """
+        
+        # Повернути на 100%
+        self.charge = self.max_capacity
+        
+        # Температура на кімнатну
+        self.temperature = 25.0
+        
+        # Здоров'я трохи менше через деградацію від попередніх циклів
+        # але не скидаємо повністю
+        cycles_degradation = self.charge_cycles * 0.05  # Менше чим раніше
+        self.health = max(50, 100 - cycles_degradation)
+        
+        # Історія очищується
+        self.charge_history = [self.charge]
+        self.temperature_history = [self.temperature]
+        self.health_history = [self.health]
+        
+        print("   🔋 Батарея перезавантажена (100%)")
+
+
+# ===== МОТОРИ =====
 
 class Motors:
+    """
+    Мотори дрона (4 штуки)
+    """
+    
     def __init__(self, num_motors: int = 4):
+        """
+        Args:
+            num_motors: Кількість моторів
+        """
+        
         self.num_motors = num_motors
-        self.motors = [
-            {
-                'status': True,
-                'rpm': 0,
-                'max_rpm': 8000,
-                'vibration': 0,
-                'temperature': 25,
-                'stress': 0,
-                'wear': 0,
-                'efficiency': 100
+        
+        # Ініціалізувати мотори
+        self.motors = []
+        for i in range(num_motors):
+            motor = {
+                'id': i,
+                'efficiency': 100.0,      # % ефективності
+                'temperature': 25.0,      # °C
+                'wear': 0.0,              # % зносу
+                'rpm': 0,                 # Обороти
+                'status': True            # Працює?
             }
-            for _ in range(num_motors)
-        ]
+            self.motors.append(motor)
+        
+        # Історія
+        self.efficiency_history = [100.0] * num_motors
+        self.temperature_history = [25.0] * num_motors
     
-    def set_rpm(self, motor_index: int, rpm: float):
-        if 0 <= motor_index < self.num_motors:
-            self.motors[motor_index]['rpm'] = min(rpm, 8000)
+    def apply_stress(self, motor_id: int, stress: float):
+        """
+        Застосувати стрес на мотор
+        
+        Args:
+            motor_id: ID мотора (0-3)
+            stress: Рівень стресу (0-1)
+        """
+        
+        if motor_id >= self.num_motors:
+            return
+        
+        motor = self.motors[motor_id]
+        
+        # Стрес на мотор
+        motor['wear'] += stress * 1.0
+        
+        # Тепло від стресу
+        motor['temperature'] += stress * 30
+        
+        # Ефективність падає з износом
+        motor['efficiency'] = max(0, 100 - motor['wear'] * 0.5)
+        
+        # Перевірити чи мотор ще працює
+        if motor['efficiency'] < 10:
+            motor['status'] = False
     
-    def apply_stress(self, motor_index: int):
-        """Розрахунок стресу як середнє від трьох факторів"""
-        if 0 <= motor_index < self.num_motors:
-            motor = self.motors[motor_index]
-            rpm_stress = motor['rpm'] / motor['max_rpm']
-            temp_stress = max(0, (motor['temperature'] - 25) / 75)
-            vib_stress = motor['vibration'] / 10
-            
-            motor['stress'] = (rpm_stress + temp_stress + vib_stress) / 3
+    def update_temperatures(self):
+        """Охолодити мотори"""
+        for motor in self.motors:
+            cooling = (motor['temperature'] - 25) * 0.05
+            motor['temperature'] = max(25, motor['temperature'] - cooling)
     
-    def update_wear(self, motor_index: int):
-        """Оновити знос на основі стресу"""
-        if 0 <= motor_index < self.num_motors:
-            motor = self.motors[motor_index]
-            motor['wear'] += motor['stress'] * 0.5
-            motor['efficiency'] = max(0, 100 - motor['wear'])
+    def get_average_efficiency(self) -> float:
+        """Середня ефективність всіх моторів"""
+        return np.mean([m['efficiency'] for m in self.motors])
     
-    def is_healthy(self, motor_index: int) -> bool:
-        if 0 <= motor_index < self.num_motors:
-            motor = self.motors[motor_index]
-            return (motor['wear'] < 70 and 
-                    motor['temperature'] < 80 and 
-                    motor['vibration'] < 8 and
-                    motor['status'])
-        return False
+    def is_healthy(self, motor_id: int = None) -> bool:
+        """
+        Чи мотор здоровий?
+        
+        Args:
+            motor_id: ID мотора (якщо None - перевіряємо всі)
+        """
+        
+        if motor_id is not None:
+            if motor_id >= self.num_motors:
+                return False
+            motor = self.motors[motor_id]
+            return motor['status'] and motor['efficiency'] > 50
+        
+        # Перевіряємо всі мотори
+        return all(self.is_healthy(i) for i in range(self.num_motors))
+    
+    def reset(self):
+        """
+        RESET моторів на початковий стан
+        """
+        
+        for i, motor in enumerate(self.motors):
+            motor['efficiency'] = 100.0
+            motor['temperature'] = 25.0
+            motor['wear'] = 0.0  # Повністю очищуємо зносу
+            motor['rpm'] = 0
+            motor['status'] = True
+        
+        # Історія очищується
+        self.efficiency_history = [100.0] * self.num_motors
+        self.temperature_history = [25.0] * self.num_motors
+        
+        print(f"   ⚙️  {self.num_motors} моторів перезавантажено")
 
-from random import gauss
+
+# ===== ДАТЧИКИ =====
 
 class Sensors:
+    """
+    Датчики дрона (3 штуки: камера, лідар, ультразвук)
+    """
+    
     def __init__(self, num_sensors: int = 3):
+        """
+        Args:
+            num_sensors: Кількість датчиків
+        """
+        
         self.num_sensors = num_sensors
-        self.sensors = [
-            {
-                'status': True,
-                'type': ['gps', 'camera', 'lidar'][i % 3],
-                'noise_level': 0.1,
-                'calibration': 1.0,
-                'reliability': 100,
-                'dirt_level': 0,
-                'measure_error': 0
+        
+        # Типи датчиків
+        sensor_types = ['camera', 'lidar', 'ultrasonic']
+        
+        # Ініціалізувати датчики
+        self.sensors = []
+        for i in range(min(num_sensors, len(sensor_types))):
+            sensor = {
+                'type': sensor_types[i],
+                'accuracy': 90.0,        # % точності
+                'dirt_level': 0.0,       # % забруднення (0-100)
+                'status': True,          # Працює?
+                'calibration_drift': 0.0 # Дрейф калібрування
             }
-            for i in range(num_sensors)
-        ]
+            self.sensors.append(sensor)
+        
+        # Історія
+        self.accuracy_history = [90.0] * num_sensors
+        self.dirt_history = [0.0] * num_sensors
     
-    def measure(self, sensor_index: int, true_value: float) -> float:
-        """Виміри з гаусовим шумом"""
-        if 0 <= sensor_index < self.num_sensors:
-            sensor = self.sensors[sensor_index]
-            noise = gauss(0, sensor['noise_level'])
-            measured = (true_value + noise) * sensor['calibration']
-            sensor['measure_error'] = abs(measured - true_value)
-            return measured
+    def apply_dirt(self, sensor_id: int, amount: float):
+        """
+        Забруднити датчик
+        
+        Args:
+            sensor_id: ID датчика (0-2)
+            amount: Кількість забруднення
+        """
+        
+        if sensor_id >= len(self.sensors):
+            return
+        
+        sensor = self.sensors[sensor_id]
+        sensor['dirt_level'] = min(100, sensor['dirt_level'] + amount)
+        
+        # Забруднення знижує точність
+        sensor['accuracy'] = max(0, 90 - sensor['dirt_level'] * 0.5)
     
-    def apply_dirt(self, sensor_index: int, dirt_amount: float):
-        if 0 <= sensor_index < self.num_sensors:
-            self.sensors[sensor_index]['dirt_level'] += dirt_amount
-            self.sensors[sensor_index]['reliability'] = max(0, 100 - self.sensors[sensor_index]['dirt_level'])
+    def clean_sensor(self, sensor_id: int):
+        """Очистити датчик"""
+        
+        if sensor_id >= len(self.sensors):
+            return
+        
+        sensor = self.sensors[sensor_id]
+        sensor['dirt_level'] = 0.0
+        sensor['accuracy'] = 90.0
     
-    def get_accuracy(self, sensor_index: int, altitude: float = 0) -> float:
-        """Точність датчика залежить від висоти та забруднення"""
-        if 0 <= sensor_index < self.num_sensors:
-            sensor = self.sensors[sensor_index]
-            
-            base = sensor['reliability'] / 100
-            calibration = sensor['calibration']
-            dirt = (100 - sensor['dirt_level']) / 100
-            altitude_factor = max(0, 1 - (altitude ** 1.5) * 0.02)
-            
-            accuracy = base * calibration * dirt * altitude_factor * 100
-            return min(100, max(0, accuracy))
-        return 0
+    def apply_calibration_drift(self, sensor_id: int, drift: float):
+        """Застосувати дрейф калібрування"""
+        
+        if sensor_id >= len(self.sensors):
+            return
+        
+        sensor = self.sensors[sensor_id]
+        sensor['calibration_drift'] += drift
+        
+        # Дрейф знижує точність
+        sensor['accuracy'] = max(0, 90 - abs(sensor['calibration_drift']))
     
-    def calibrate(self, sensor_index: int):
-        if 0 <= sensor_index < self.num_sensors:
-            self.sensors[sensor_index]['calibration'] = 1.0
+    def get_average_accuracy(self) -> float:
+        """Середня точність всіх датчиків"""
+        return np.mean([s['accuracy'] for s in self.sensors])
+    
+    def is_working(self, sensor_id: int = None) -> bool:
+        """
+        Чи датчик працює?
+        
+        Args:
+            sensor_id: ID датчика (якщо None - перевіряємо всі)
+        """
+        
+        if sensor_id is not None:
+            if sensor_id >= len(self.sensors):
+                return False
+            sensor = self.sensors[sensor_id]
+            return sensor['status'] and sensor['accuracy'] > 20
+        
+        # Перевіряємо всі датчики
+        return all(self.is_working(i) for i in range(len(self.sensors)))
+    
+    def reset(self):
+        """
+        RESET датчиків на початковий стан
+        """
+        
+        for sensor in self.sensors:
+            sensor['accuracy'] = 90.0
+            sensor['dirt_level'] = 0.0
+            sensor['status'] = True
+            sensor['calibration_drift'] = 0.0
+        
+        # Історія очищується
+        self.accuracy_history = [90.0] * len(self.sensors)
+        self.dirt_history = [0.0] * len(self.sensors)
+        
+        print(f"   📡 {len(self.sensors)} датчиків перезавантажено")
+
+
+# ===== СТРУКТУРА =====
 
 class Structure:
+    """
+    Структурна цілісність дрона
+    Включає пропелери, раму, крила
+    """
+    
     def __init__(self, num_propellers: int = 4):
-        self.integrity = 100.0
+        """
+        Args:
+            num_propellers: Кількість пропелерів
+        """
+        
         self.num_propellers = num_propellers
-        self.propeller_health = [100.0] * num_propellers  # ← Змінено на здоров'я
-        self.antenna_status = True
-        self.crash_count = 0
-        self.impact_log = []
+        
+        # Пропелери
+        self.propeller_health = [100.0] * num_propellers  # % здоров'я кожного
+        
+        # Рама
+        self.integrity = 100.0  # % цілісності рами (0-100)
+        
+        # Статистика
+        self.crash_count = 0      # Кількість зіткнень
+        self.total_damage = 0.0   # Сумарне пошкодження
+        
+        # Історія
+        self.integrity_history = [100.0]
+        self.crash_history = []
     
-    def apply_damage(self, severity: float, location: str = "unknown"):
-        """Застосувати пошкодження"""
-        self.integrity = max(0, self.integrity - severity)
+    def apply_damage(self, damage: float):
+        """
+        Застосувати пошкодження до структури
+        
+        Args:
+            damage: Сила пошкодження (0-1)
+        """
+        
+        # Розподілити пошкодження
+        propeller_damage = damage * 25
+        frame_damage = damage * 75
+        
+        # Пошкодити пропелери
+        for i in range(self.num_propellers):
+            self.propeller_health[i] = max(0, self.propeller_health[i] - propeller_damage)
+        
+        # Пошкодити раму
+        self.integrity = max(0, self.integrity - frame_damage)
+        
+        # Записати в історію
+        self.total_damage += damage
+        self.integrity_history.append(self.integrity)
+    
+    def record_crash(self, terrain_type: str, damage: float):
+        """
+        Записати зіткнення
+        
+        Args:
+            terrain_type: Тип терену
+            damage: Сила пошкодження
+        """
+        
+        crash_event = {
+            'count': self.crash_count,
+            'terrain': terrain_type,
+            'damage': damage
+        }
+        self.crash_history.append(crash_event)
         self.crash_count += 1
-        self.impact_log.append({'location': location, 'severity': severity})
-    
-    def damage_propeller(self, propeller_index: int, damage: float):
-        if 0 <= propeller_index < self.num_propellers:
-            self.propeller_health[propeller_index] = max(0, self.propeller_health[propeller_index] - damage)
+        
+        # Застосувати пошкодження
+        self.apply_damage(damage)
     
     def get_structural_integrity(self) -> float:
-        """Загальна цілісність 0-100"""
-        avg_propeller = sum(self.propeller_health) / self.num_propellers
-        # 50% рама, 50% пропелери
-        return (self.integrity * 0.5 + avg_propeller * 0.5)
+        """Отримати цілісність структури (0-100%)"""
+        return self.integrity
     
     def is_flightworthy(self) -> bool:
-        """Чи дрон може летіти?"""
+        """
+        Чи дрон придатний до польоту?
+        Потребує:
+        - Цілісність > 50%
+        - Мінімум 3 пропелера >30%
+        """
+        
         working_propellers = sum(1 for h in self.propeller_health if h > 30)
-        return (self.integrity > 50 and 
-                working_propellers >= 2 and 
-                self.antenna_status)
+        
+        return (
+            self.integrity > 50 and
+            working_propellers >= 3
+        )
     
-    def aerodynamic_efficiency(self) -> float:
-        """0-1, де 1 = ідеально"""
-        integrity_factor = self.integrity / 100
-        propeller_factor = sum(self.propeller_health) / (self.num_propellers * 100)
-        return integrity_factor * propeller_factor
+    def reset(self):
+        """
+        RESET структури на початковий стан
+        """
+        
+        # Пропелери на 100%
+        self.propeller_health = [100.0] * self.num_propellers
+        
+        # Рама на 100%
+        self.integrity = 100.0
+        
+        # Очистити статистику зіткнень
+        self.crash_count = 0
+        self.total_damage = 0.0
+        
+        # Історія очищується
+        self.integrity_history = [100.0]
+        self.crash_history = []
+        
+        print(f"   🛡️  Структура перезавантажена ({self.num_propellers} пропелерів)")

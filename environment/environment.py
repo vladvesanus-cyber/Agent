@@ -236,29 +236,28 @@ class DroneEnvironment:
         
         return cost
     
-    def _get_observation(self) -> Dict:
-        """
-        Повернути спостереження на основі конфіга
-        """
+    def get_observation(self) -> Dict:
+        """Отримати спостереження про світ"""
+        
+        local_map = self.get_local_map()
+        
         observation = {
             'position': (self.drone_x, self.drone_y, self.drone_z),
-            'local_map': self._get_local_map(),
+            'local_map': local_map,
             'exploration_ratio': len(self.visited_cells) / (self.width * self.height),
-            'visited_cells': self.visited_cells,
-            'step_count': self.step_count,
-            'collision_log': self.collision_log
+            'visited_cells': len(self.visited_cells),
+            'sensor_accuracy': self.calculate_sensor_accuracy(self.drone_z),
+            'step_count': self.step_count
         }
-        
-        if self.include_health:
-            observation['health'] = self._get_health_info()
         
         return observation
     
-    def _get_local_map(self) -> np.ndarray:
+    def get_local_map(self) -> np.ndarray:
         """
         Локальна карта на основі radius з конфіга
+        За межами карти = -1 (границя!)
         """
-        local = np.zeros((2*self.observation_radius+1, 2*self.observation_radius+1))
+        local = np.full((2*self.observation_radius+1, 2*self.observation_radius+1), -1, dtype=float)
         
         for dy in range(-self.observation_radius, self.observation_radius+1):
             for dx in range(-self.observation_radius, self.observation_radius+1):
@@ -267,6 +266,9 @@ class DroneEnvironment:
                 
                 if 0 <= x < self.width and 0 <= y < self.height:
                     local[dy+self.observation_radius, dx+self.observation_radius] = self.world_map[y, x]
+                else:
+                    # За межами карти -境界 (границя)
+                    local[dy+self.observation_radius, dx+self.observation_radius] = -1
         
         return local
     
@@ -297,33 +299,49 @@ class DroneEnvironment:
     def detect_collision(self, x: float, y: float, z: float) -> bool:
         """
         Чи буде колізія на цій позиції?
-        Замість: CollisionDetector.predict_collision()
+        
+        Проверяет:
+        - Границы карты
+        - Препятствия на земле
+        - Деревья на высоте
         """
         
-        if not (0 <= x < self.width and 0 <= y < self.height):
-            return True  # За межами карти
+        # ===== ПЕРЕВІРИТИ ГРАНИЦІ КАРТИ =====
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return True  # За межами карти - колізія!
         
+        # ===== ПЕРЕВІРИТИ ВИСОТУ =====
         if z < 0 or z > self.max_altitude:
-            return True  # За межами висоти
+            return True
         
-        # На землі (z <= 1) перевіряємо терен
+        # ===== НА ЗЕМЛІ (z <= 1) - ВСЕ ПЕРЕШКОДЖАЄ =====
         if z <= 1:
-            cell = self.world_map[int(y), int(x)]
-            if cell in [Terrain.OBSTACLE.value, Terrain.WATER.value]:
-                return True
-        
-        # На висоті можемо облітати більшість препятствій
-        if z > 1:
-            cell = self.world_map[int(y), int(x)]
+            cell = int(self.world_map[int(y), int(x)])
+            
+            if cell == Terrain.OBSTACLE.value:
+                return True  # Стіна
+            if cell == Terrain.WATER.value:
+                return True  # Вода
+            if cell == Terrain.MOUNTAIN.value:
+                return True  # Гора
             if cell == Terrain.TREE.value:
-                return np.random.random() < 0.5
+                return True  # Дерево на землі
+        
+        # ===== НА ВИСОТІ (1 < z <= max_altitude) =====
+        elif z > 1:
+            cell = int(self.world_map[int(y), int(x)])
+            
+            # Тільки дерева мають гілки
+            if cell == Terrain.TREE.value:
+                return np.random.random() < 0.3
+            
+            return False
         
         return False
-    
+
     def classify_terrain(self, x: float, y: float) -> str:
         """
         Розпізнати тип терену
-        Замість: CollisionDetector.classify_terrain()
         """
         
         if not (0 <= x < self.width and 0 <= y < self.height):
@@ -340,20 +358,25 @@ class DroneEnvironment:
         }
         
         return terrain_map.get(cell, "unknown")
-    
+
     def calculate_collision_damage(self, terrain_type: str, altitude: float) -> float:
         """
         Розрахувати пошкодження від колізії
-        Замість: CollisionDetector.calculate_collision_severity()
+        
+        Логіка:
+        - На землі: максимальне пошкодження
+        - На висоті: мінімальне (спускаємось повільно)
+        - Вода: критична на землі, не впливає на висоті
         """
         
+        # Базове пошкодження за типом
         damage_map = {
-            'hard_obstacle': 1.0,      # 100% пошкодження
-            'tree_branches': 0.3,      # 30% пошкодження
-            'mountain': 0.5,           # 50% пошкодження
-            'water': 0.8,              # 80% пошкодження
-            'out_of_bounds': 1.0,      # 100% пошкодження
-            'free': 0.0                # 0% пошкодження
+            'hard_obstacle': 1.0,
+            'tree_branches': 0.3,
+            'mountain': 0.5,
+            'water': 0.8,
+            'out_of_bounds': 1.0,
+            'free': 0.0
         }
         
         base_damage = damage_map.get(terrain_type, 0.0)
@@ -362,8 +385,15 @@ class DroneEnvironment:
             return 0.0
         
         # На низькій висоті пошкодження серйозніше
-        altitude_factor = 1 + (5 - altitude) / 5
-        altitude_factor = max(0.1, min(2.0, altitude_factor))
+        # На висоті > 5м - пошкодження мінімальне
+        if altitude <= 1:
+            altitude_factor = 1.5  # 150% пошкодження на землі
+        elif altitude <= 3:
+            altitude_factor = 1.2  # 120%
+        elif altitude <= 5:
+            altitude_factor = 0.8  # 80%
+        else:
+            altitude_factor = 0.2  # Мінімум на висоті
         
         total_damage = base_damage * altitude_factor
         return min(1.0, total_damage)

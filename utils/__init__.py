@@ -1,7 +1,6 @@
 """
 Utils module: helpers, constants, reproducibility
 """
-from .config_loader import ConfigLoader
 from .helpers import (
     load_config,
     save_config,
@@ -34,8 +33,7 @@ __all__ = [
     'MAX_STEPS',
     'NUM_MOTORS',
     'NUM_SENSORS',
-    'NUM_PROPELLERS',
-    'ConfigLoader'
+    'NUM_PROPELLERS'
 ]
 
 __version__ = '1.0.0'
