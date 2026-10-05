@@ -14,7 +14,7 @@ drone:
   start_x: 15                # Центр
   start_y: 15
   start_z: 0                 # На землі
-  battery_capacity: 350      # % енергії
+  battery_capacity: 150      # % енергії
   max_altitude: 20           # Максимум висота
   
 physics:
@@ -32,5 +32,5 @@ observation:
   include_health: true       # Включити інформацію про здоров'я
   
 episode:
-  max_steps: 500
+  max_steps: 1000
   seed: 42                   # Для репродукованості

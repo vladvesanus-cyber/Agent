@@ -68,6 +68,14 @@ class DroneEnvironment:
         # Спостереження
         self.observation_radius = config['observation']['radius']
         self.include_health = config['observation']['include_health']
+
+        # ===== КВАЛІТА СКАНУВАННЯ (ЗАЛЕЖНО ВІД ВИСОТИ) =====
+        # Занадто низько: пилюка/трава біля землі заважає сенсорам.
+        # Занадто високо: гірша роздільна здатність сенсора.
+        # В "хорошому" діапазоні - скан на 100%, за межами - лінійно падає до 0.
+        self.min_good_altitude = config['observation'].get('min_good_altitude', 2.0)
+        self.max_good_altitude = config['observation'].get('max_good_altitude', 10.0)
+        self.min_scan_quality = config['observation'].get('min_scan_quality', 50.0)
         
         # Епізод
         self.max_steps = config['episode']['max_steps']
@@ -134,7 +142,18 @@ class DroneEnvironment:
             x = np.random.randint(0, self.width)
             y = np.random.randint(0, self.height)
             terrain[y, x] = Terrain.MOUNTAIN.value
-        
+
+        # ===== ОЧИСТИТИ БАЗУ (СТАРТ/ДОМ) ВІД ПЕРЕШКОД =====
+        # Випадкова генерація вище може покласти перешкоду/дерево/воду/гору
+        # прямо на стартову клітину дрона. Тоді дрон не може навіть
+        # піднятись з місця (на землі все блокує), а при поверненні додому
+        # для перезарядки ця ж клітина завжди лишається "небезпечною".
+        # База має бути гарантовано вільною - чистимо саму клітину й
+        # найближчі сусідні (щоб було куди сісти навіть при невеликому зносі).
+        for hy in range(max(0, self.start_y - 1), min(self.height, self.start_y + 2)):
+            for hx in range(max(0, self.start_x - 1), min(self.width, self.start_x + 2)):
+                terrain[hy, hx] = Terrain.FREE.value
+
         return terrain
     
     # ===== СИМУЛЯЦІЯ =====
@@ -272,6 +291,32 @@ class DroneEnvironment:
         
         return local
     
+    def calculate_scan_quality(self, altitude: float) -> float:
+        """
+        Kvalita skenu zavisi od vysky letu (0-100):
+
+        - Pod min_good_altitude: dron je prilis nizko - prach, trava a
+          okolite prekazky rusia senzory. Kvalita klesa linearne k 0 na
+          samotnej zemi (z=0).
+        - V pasme [min_good_altitude, max_good_altitude]: idealna vyska,
+          plna kvalita (100 %).
+        - Nad max_good_altitude: klesajuce rozlisenie senzora. Kvalita
+          klesa linearne k 0 pri max_altitude.
+        """
+        if altitude < self.min_good_altitude:
+            span = max(self.min_good_altitude, 1e-6)
+            return max(0.0, min(100.0, (altitude / span) * 100.0))
+
+        if altitude > self.max_good_altitude:
+            span = max(self.max_altitude - self.max_good_altitude, 1e-6)
+            return max(0.0, 100.0 - (altitude - self.max_good_altitude) / span * 100.0)
+
+        return 100.0
+
+    def is_scan_good(self, altitude: float) -> bool:
+        """Chi je sken na danej vyske dost kvalitny na to, aby sa bunka ratala ako preskumana?"""
+        return self.calculate_scan_quality(altitude) >= self.min_scan_quality
+
     def _get_health_info(self) -> Dict:
         """Placeholder для health інформації"""
         return {}

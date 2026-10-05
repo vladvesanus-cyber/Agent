@@ -35,7 +35,7 @@ configs:
     drone:
       battery_capacity: 100  # ← СТАНДАРТНА
     physics:
-      energy_base_cost: 1.0  # ← СТАНДАРТНА
+      energy_base_cost: 0.6  # ← СТАНДАРТНА
     episode:
       max_steps: 1000
       seed: 42

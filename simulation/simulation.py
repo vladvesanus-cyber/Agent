@@ -42,6 +42,12 @@ class Simulator:
         
         self.step_count = 0
         self.total_reward = 0
+
+        # Ci sa epizoda skoncila USPESNE (preskumanie splnene A dron je dома).
+        # Nastavuje sa iba v _check_termination_conditions() - inak zostava False
+        # (napr. ak dosla baterka alebo sa skoncil max_steps pred navratom domov).
+        self.mission_success = False
+        self.bad_scan_count = 0  # pocet krokov, kde sken nebol dost kvalitny na zapocitanie
     
     def _create_drone(self, config: Dict) -> Drone:
         """Створити дрона"""
@@ -150,9 +156,23 @@ class Simulator:
                     self.env.drone_x = self.drone.position[0]
                     self.env.drone_y = self.drone.position[1]
                     self.env.drone_z = self.drone.position[2]
-                    self.env.visited_cells.add((int(self.drone.position[0]), 
-                                            int(self.drone.position[1])))
-                    
+
+                    # ===== ПОЗНАЧИТИ КЛІТИНУ ЯК ДОСЛІДЖЕНУ - ТІЛЬКИ ЯКЩО СКАН ЯКІСНИЙ =====
+                    # Занадто низько (пилюка/перешкоди біля землі) або занадто
+                    # високо (гірша роздільна здатність) -> "поганий кадр",
+                    # клітина НЕ рахується як оглянута.
+                    scan_quality = self.env.calculate_scan_quality(self.drone.position[2])
+                    scan_ok = scan_quality >= self.env.min_scan_quality
+
+                    if scan_ok:
+                        self.env.visited_cells.add((int(self.drone.position[0]),
+                                                int(self.drone.position[1])))
+                    else:
+                        self.bad_scan_count += 1
+                        if iteration <= 20:
+                            print(f"   📷 Поганий кадр (висота {self.drone.position[2]:.1f}м, "
+                                  f"якість скану {scan_quality:.0f}%) - клітина не зарахована")
+
                     # Оновити здоров'я
                     energy_consumed = self._calculate_energy_consumed(action)
                     motor_stress = self._calculate_motor_stress(action)
@@ -171,9 +191,10 @@ class Simulator:
                     self._record_step_data()
                     self.step_count += 1
                     
-                    print(f"Крок {iteration}: Позиція {self.drone.position}, "
-                        f"Висота {self.drone.position[2]:.1f}м, "
-                        f"Батарея {observation['health']['battery']['charge_percent']:.1f}%")
+                    if iteration <= 20:
+                        print(f"Крок {iteration}: Позиція {self.drone.position}, "
+                            f"Висота {self.drone.position[2]:.1f}м, "
+                            f"Батарея {observation['health']['battery']['charge_percent']:.1f}%")
                 else:
                     done = True
                     if iteration <= 20:
@@ -231,8 +252,15 @@ class Simulator:
             'visited_cells': visited_cells_set,
             'visited_cells_count': visited_cells_count,
             'step_count': self.step_count,
-            
-            # ❌ НЕ передаємо map_width/map_height/start_x/start_y!
+
+            # ===== ЯКІСТЬ СКАНУ НА ПОТОЧНІЙ ВИСОТІ =====
+            # Якщо scan_ok=False - клітина на цій висоті НЕ буде зарахована
+            # як досліджена (занадто низько = пилюка, занадто високо = гірша роздільна здатність).
+            'scan_quality': self.env.calculate_scan_quality(self.drone.position[2]),
+            'scan_ok': self.env.is_scan_good(self.drone.position[2]),
+
+            # ===== ДОМАШНЯ ПОЗИЦІЯ =====
+            'home_position': (self.env.start_x, self.env.start_y),  # ← Для повернення додому!
             
             'health': {
                 'overall_health': overall_health,
@@ -268,10 +296,15 @@ class Simulator:
         
         cost = distance * self.env.energy_base_cost
         
-        altitude_multiplier = 1 + (self.drone.position[2] / 10) ** 2
+        # ===== ОПТИМІЗОВАНИЙ МНОЖНИК ВИСОТИ =====
+        # Було: 1 + (h/10)^2 - дорого (на 10м = 2.0x)
+        # Стало: 1 + (h/20)^2 - оптимально (на 10м = 1.25x)
+        altitude_multiplier = 1 + (self.drone.position[2] / 20) ** 2
         cost *= altitude_multiplier
         
-        cost += abs(dz) * 0.5
+        # ===== ВЕРТИКАЛЬНИЙ РУХ =====
+        # Менше коштує за вертикальний рух
+        cost += abs(dz) * 0.3
         
         energy_percent = (cost / self.env.battery_capacity) * 100
         self.drone.battery.discharge(energy_percent)
@@ -295,17 +328,26 @@ class Simulator:
         position = observation['position']
         exploration = observation['exploration_ratio']
         
-        # ===== УМОВА 1: ДОМ =====
+        # ===== УМОВА 1: ДОМ - ПЕРЕЗАРЯДКА =====
         # ⚠️ ВАЖЛИВО: Перевіряємо ТОЧНЕ місцезнаходження
         is_at_home = (
             abs(position[0] - self.env.start_x) < 0.5 and
             abs(position[1] - self.env.start_y) < 0.5
         )
         
+        if is_at_home and battery < 95:
+            # Перезарядити батарею!
+            # (було: self.drone.battery.charge_percent = 100.0 - це НЕ працювало,
+            #  бо у Battery немає атрибута charge_percent, тільки charge.
+            #  Через це дрон ніколи насправді не заряджався вдома.)
+            self.drone.recharge_battery(100.0 - battery)
+            print(f"   🔋 ПЕРЕЗАРЯДКА! Батарея: {battery:.1f}% → "
+                  f"{self.drone.battery.get_remaining_range():.1f}%")
+            # Не завершувати - продовжити дослідження!
         
         # ===== УМОВА 2: БАТАРЕЯ КРИТИЧНА =====
         if battery < 10:
-            print(f"   🔴 Батарея критична ({battery:.1f}%)!")
+            print(f"   🔴 Батарея критична ({battery:.1f}%)! Не можу повернутись!")
             return True
         
         # ===== УМОВА 3: ДРОН ПОЛАМАНИЙ =====
@@ -313,11 +355,16 @@ class Simulator:
             print(f"   💥 Дрон не придатний до польоту!")
             return True
         
-        # ===== УМОВА 4: ДОСЛІДЖЕНО ДОСТАТНЬО =====
-        if exploration > 0.8:
-            print(f"   🎉 Досліджено {exploration*100:.1f}%!")
+        # ===== УМОВА 4: УСПІШНЕ ЗАВЕРШЕННЯ МІСІЇ =====
+        # Успіх рахується ТІЛЬКИ якщо дрон (а) досліджував достатньо і
+        # (б) фактично повернувся та приземлився на базі. Самого високого
+        # % покриття десь посеред поля вже недостатньо - це або продовження
+        # польоту, або (якщо батарея скінчиться раніше) невдача.
+        if exploration > 0.9 and is_at_home:
+            print(f"   🎉 УСПІХ: Досліджено {exploration*100:.1f}% і дрон повернувся додому!")
+            self.mission_success = True
             return True
-        
+
         return False
     
     def _record_step_data(self):
@@ -343,6 +390,8 @@ class Simulator:
             'final_health': observation['health']['overall_health'],
             'final_position': observation['position'],
             'collision_count': self.drone.structure.crash_count,
+            'mission_success': self.mission_success,
+            'bad_scan_count': self.bad_scan_count,
             'episode_data': self.episode_data
         }
         

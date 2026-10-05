@@ -2,6 +2,7 @@
 ConfigLoader - завантаження та управління конфігами
 """
 
+import copy
 import yaml
 from pathlib import Path
 from typing import Dict, List
@@ -116,34 +117,40 @@ class ConfigLoader:
     def get_config(self, config_name: str) -> Dict:
         """
         Отримати конфіку за назвою (easy, medium, hard)
-        
+
         Args:
             config_name: Назва конфіки (easy/medium/hard)
-        
+
         Returns:
             Об'єднана конфіка (базова + спеціалізована)
-        
+
         Example:
             config = loader.get_config('medium')
         """
-        
-        # Знайти конфіку в експериментах
-        experiment = None
-        for exp in self.experiments_config['experiments']:
-            if exp['config'] == config_name:
-                experiment = exp
-                break
-        
-        if experiment is None:
-            available = [e['config'] for e in self.experiments_config['experiments']]
+
+        # ===== ЗНАЙТИ ПЕРЕВИЗНАЧЕННЯ У СЕКЦІЇ 'configs' =====
+        # УВАГА: раніше тут шукалось у experiments_config['experiments'] -
+        # але там лежать лише {name, config, runs, seeds} для кожного
+        # прогону експерименту. Самі перевизначення map/terrain/drone/
+        # physics/episode лежать у experiments.yaml під configs.<назва>.
+        # Через цю помилку easy/medium/hard завжди повертали ОДНАКОВУ
+        # (базову) конфігурацію - жодне перевизначення ніколи не застосовувалось.
+        configs_section = self.experiments_config.get('configs', {})
+
+        if config_name not in configs_section:
+            available = list(configs_section.keys())
             raise ValueError(
                 f"❌ Конфіка не знайдена: {config_name}\n"
                 f"   Доступні: {', '.join(available)}"
             )
-        
-        # Об'єднати базову конфіку з експериментною
-        config = self._merge_configs(self.base_config, experiment)
-        
+
+        specific = configs_section[config_name]
+
+        # Об'єднати базову конфіку з специфічною (глибока копія -
+        # inакше повторні виклики get_config() на тому самому loader'і
+        # могли б накопичувати перевизначення одне на одному).
+        config = self._merge_configs(self.base_config, specific)
+
         print(f"✅ Конфіка обрана: {config_name}")
         return config
     
@@ -207,13 +214,21 @@ class ConfigLoader:
             print(f"   Max steps: {exp['episode']['max_steps']}")
 
     def _merge_configs(self, base: Dict, specific: Dict) -> Dict:
-            """Об'єднати два конфіги (specific перевизначає base)"""
-            merged = base.copy()
-            
+            """
+            Об'єднати два конфіги (specific перевизначає base).
+
+            Глибока копія: base.copy() - це ЛИШЕ поверхнева копія, вкладені
+            словники (map/terrain/drone/...) лишались ТИМИ Ж об'єктами, що й
+            у self.base_config. merged[key].update(value) тоді мутував би
+            сам self.base_config, і наступний виклик get_config() для
+            ІНШОЇ конфігурації отримав би залишки попередньої.
+            """
+            merged = copy.deepcopy(base)
+
             for key, value in specific.items():
-                if isinstance(value, dict) and key in merged:
-                    merged[key].update(value)
+                if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
+                    merged[key].update(copy.deepcopy(value))
                 else:
-                    merged[key] = value
-            
+                    merged[key] = copy.deepcopy(value)
+
             return merged
