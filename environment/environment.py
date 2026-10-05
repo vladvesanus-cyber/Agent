@@ -379,6 +379,8 @@ class DroneEnvironment:
             # Тільки дерева мають гілки
             if cell == Terrain.TREE.value:
                 return np.random.random() < 0.3
+            elif cell == Terrain.MOUNTAIN.value:
+                return True  # Гори можуть мати виступи
             
             return False
         

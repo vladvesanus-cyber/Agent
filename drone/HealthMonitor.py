@@ -75,21 +75,28 @@ class HealthMonitor:
     
     # ===== БАТАРЕЯ =====
     
-    def _update_battery(self, energy_consumed: float, ambient_temp: float):
-        """Оновити батарею"""
-        
-        # Розрядити батарею
+    def _update_battery(
+        self,
+        energy_consumed: float,
+        ambient_temp: float,
+    ):
+        """Update battery charge, temperature, and health."""
+
         self.battery.discharge(energy_consumed)
-        
-        # Тепло від розрядження
-        heat = energy_consumed * 0.5
+
+        heat = energy_consumed * 0.8
+
         self.battery.apply_thermal_stress(heat)
-        
-        # Охолоджування
-        cooling = (self.battery.temperature - ambient_temp) * 0.05
-        self.battery.temperature = max(ambient_temp, self.battery.temperature - cooling)
-        
-        # Оновити здоров'я батареї
+
+        cooling = (
+            self.battery.temperature - ambient_temp
+        ) * 0.05
+
+        self.battery.temperature = max(
+            ambient_temp,
+            self.battery.temperature - cooling,
+        )
+
         self.battery.update_health()
     
     # ===== МОТОРИ =====

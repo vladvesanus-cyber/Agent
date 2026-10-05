@@ -38,14 +38,6 @@ from simulation import Simulator
 from agents import AdaptiveHeightAgent, BoustrophedonAgent
 from utils import set_seed
 
-# Nacitat DEMO_CONFIG priamo zo suboru demo/demo.py cestou k suboru,
-# bez spoliehania sa na to, ze "demo" je balik (ziadne __init__.py).
-_spec = importlib.util.spec_from_file_location("_demo_config_module", os.path.join(_THIS_DIR, "demo.py"))
-_demo_module = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_demo_module)
-DEMO_CONFIG = _demo_module.DEMO_CONFIG
-
-
 # ===== ANSI =====
 RESET = "\033[0m"
 CLEAR = "\033[H\033[2J"
@@ -262,7 +254,7 @@ def animate(agent, config, delay, max_render_steps=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Terminalova animacia letu drona")
-    parser.add_argument('--config', choices=['easy', 'medium', 'hard', 'demo'], default='demo',
+    parser.add_argument('--config', choices=['easy', 'medium', 'hard'], default='easy',
                         help="easy/medium/hard = config/experiments.yaml (ako main.py); "
                              "demo = zahustena ukazkova mapa z demo/demo.py s vela stromami (default)")
     parser.add_argument('--agent', choices=['adaptive', 'baseline'], default='adaptive',
@@ -274,17 +266,11 @@ def main():
     parser.add_argument('--max-steps', type=int, default=None,
                         help="obmedzi pocet vykreslenych krokov")
     args = parser.parse_args()
-
-    if args.config == 'demo':
-        # Zahustena ukazkova mapa (vela stromov) z demo/demo.py - dobre
-        # vidno kolizie s konarmi, ale NIE je to konfiguracia z
-        # config/experiments.yaml.
-        config = copy.deepcopy(DEMO_CONFIG)
-    else:
-        # Rovnaka cesta ako main.py --config easy/medium/hard:
-        # ConfigLoader necita demo/demo.py, ale config/experiments.yaml.
-        loader = ConfigLoader(config_dir=os.path.join(_PROJECT_ROOT, 'config'))
-        config = loader.get_config(args.config)
+        
+    # Rovnaka cesta ako main.py --config easy/medium/hard:
+    # ConfigLoader necita demo/demo.py, ale config/experiments.yaml.
+    loader = ConfigLoader(config_dir=os.path.join(_PROJECT_ROOT, 'config'))
+    config = loader.get_config(args.config)
 
     if args.seed is not None:
         config['episode']['seed'] = args.seed

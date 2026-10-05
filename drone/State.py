@@ -56,32 +56,36 @@ class Battery:
         self.charge_cycles += 1
         self.charge_history.append(self.charge)
     
-    def apply_thermal_stress(self, heat: float):
-        """Застосувати тепловий стрес"""
-        self.temperature += heat
-        self.temperature = min(60, self.temperature)  # Макс 60°C
-    
+    def apply_thermal_stress(self, stress: float):
+        """Increase battery temperature because of thermal stress."""
+
+        self.temperature += max(0.0, stress)
+
+
     def update_health(self):
-        """Оновити здоров'я батареї"""
-        # Деградація від циклів розрядження
-        cycles_degradation = self.charge_cycles * 0.1
-        
-        # Деградація від теплових циклів
+        """Reduce battery health when temperature or usage is excessive."""
+
         if self.temperature > 40:
-            thermal_degradation = (self.temperature - 40) * 0.5
-        else:
-            thermal_degradation = 0
-        
-        # Деградація від глибоких розрядок
-        deep_degradation = self.deep_discharge_count * 0.2
-        
-        total_degradation = cycles_degradation + thermal_degradation + deep_degradation
-        self.health = max(0, 100 - total_degradation)
-        self.health_history.append(self.health)
-    
+            overheating = self.temperature - 40
+            self.health -= overheating * 0.5
+
+        if self.charge_cycles > 100:
+            self.health -= 0.05
+
+        self.health = max(
+            0.0,
+            min(100.0, self.health),
+        )
+
+
     def is_healthy(self) -> bool:
-        """Чи батарея здорова?"""
-        return self.health > 50 and self.temperature < 50
+        """Return whether the battery is safe to use."""
+
+        return (
+            self.health > 20.0
+            and self.temperature < 60.0
+            and self.charge > 5.0
+        )
     
     def get_remaining_range(self) -> float:
         """Отримати % заряду"""
@@ -144,32 +148,44 @@ class Motors:
         self.efficiency_history = [100.0] * num_motors
         self.temperature_history = [25.0] * num_motors
     
-    def apply_stress(self, motor_id: int, stress: float):
+    def apply_stress(self, motor_index: int, stress: float):
         """
-        Застосувати стрес на мотор
-        
-        Args:
-            motor_id: ID мотора (0-3)
-            stress: Рівень стресу (0-1)
+        Apply load to a motor and update RPM, temperature, wear,
+        and efficiency.
         """
-        
-        if motor_id >= self.num_motors:
-            return
-        
-        motor = self.motors[motor_id]
-        
-        # Стрес на мотор
-        motor['wear'] += stress * 1.0
-        
-        # Тепло від стресу
-        motor['temperature'] += stress * 30
-        
-        # Ефективність падає з износом
-        motor['efficiency'] = max(0, 100 - motor['wear'] * 0.5)
-        
-        # Перевірити чи мотор ще працює
-        if motor['efficiency'] < 10:
-            motor['status'] = False
+
+        stress = max(0.0, min(1.0, stress))
+
+        motor = self.motors[motor_index]
+
+        motor["rpm"] = 1000.0 + stress * 4500.0
+
+        rpm_factor = max(
+            0.0,
+            (motor["rpm"] - 4000.0) / 1500.0,
+        )
+
+        motor["wear"] += (
+            stress * 0.8
+            + rpm_factor * 0.6
+        )
+
+        motor["temperature"] += (
+            stress * 18.0
+            + rpm_factor * 12.0
+        )
+
+        motor["efficiency"] = max(
+            0.0,
+            100.0 - motor["wear"],
+        )
+
+        if motor["temperature"] > 80:
+            motor["status"] = "overheated"
+        elif motor["temperature"] > 60:
+            motor["status"] = "hot"
+        else:
+            motor["status"] = "normal"
     
     def update_temperatures(self):
         """Охолодити мотори"""

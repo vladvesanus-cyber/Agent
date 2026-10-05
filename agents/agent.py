@@ -4,7 +4,7 @@ AdaptiveHeightAgent - розумний агент що вчиться без з�
 
 import numpy as np
 import random
-from typing import Dict, Set, Tuple
+from typing import Dict
 
 
 class AdaptiveHeightAgent:
@@ -269,8 +269,6 @@ class AdaptiveHeightAgent:
                     is_safe = True
                 elif cell_int == 3 and altitude >= 5:  # WATER на висоті
                     is_safe = True
-                elif cell_int == 4 and altitude >= 5:  # MOUNTAIN на висоті
-                    is_safe = True
                 
                 # ===== ВИЗНАЧИТИ ЧИ НОВА КЛІТИНА =====
                 new_x = position[0] + dx
@@ -303,7 +301,14 @@ class AdaptiveHeightAgent:
         if safe_old:
             best_direction = random.choice(safe_old)
             return best_direction
-        
+        frontier_move = self._move_toward_exploration_frontier(
+            position,
+            visited_cells,
+            local_map,
+        )
+
+        if frontier_move is not None:
+            return frontier_move
         # ПРІОРИТЕТ 3: Нові ЧЕРЕЗ ДЕРЕВА (агресивно, але лише якщо нема альтернативи!)
         if risky_new:
             print(f"   ⚠️  АГРЕСИВНО: Немає безпечних нових клеток! Летимо через дерева...")
@@ -435,3 +440,52 @@ class AdaptiveHeightAgent:
 
         # ===== ОСТАННІЙ ЗАСІБ - ПІДНЯТИСЬ ВИЩЕ =====
         return (0, 0, 1)
+
+    def _move_toward_exploration_frontier(
+        self,
+        position: tuple,
+        visited_cells: set,
+        local_map: np.ndarray,
+    ):
+        """
+        Move toward an unvisited cell adjacent to the explored frontier.
+        """
+
+        directions = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+        ]
+
+        candidates = []
+
+        for visited_x, visited_y in visited_cells:
+            for dx, dy, dz in directions:
+                target = (
+                    visited_x + dx,
+                    visited_y + dy,
+                )
+
+                if target in visited_cells:
+                    continue
+
+                distance = (
+                    abs(target[0] - position[0])
+                    + abs(target[1] - position[1])
+                )
+
+                candidates.append(
+                    (
+                        distance,
+                        target,
+                        (dx, dy, dz),
+                    )
+                )
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+
+        return candidates[0][2]

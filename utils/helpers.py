@@ -105,6 +105,33 @@ def ensure_file_dir(file_path: str):
 
 # ===== ЗБЕРЕЖЕННЯ РЕЗУЛЬТАТІВ =====
 
+def make_json_safe(obj: Any) -> Any:
+    """
+    Рекурсивно перетворити обʼєкт у форму, яку json.dump() може записати.
+
+    Результати симуляції (Simulator.run_episode()) містять типи, які
+    json НЕ вміє серіалізувати напряму:
+    - set (напр. explored_cells) -> list
+    - numpy-скаляри (np.float64, np.int64, np.bool_) -> звичайний Python-тип
+    - tuple -> list (json так робить і сам, але краще явно)
+
+    Без цього save_results() впаде з TypeError на першому ж результаті
+    експерименту, що містить set або numpy-значення.
+    """
+
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [make_json_safe(v) for v in obj]
+    if isinstance(obj, set):
+        return sorted(make_json_safe(v) for v in obj)
+    if isinstance(obj, np.generic):  # np.float64, np.int64, np.bool_, ...
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 def save_results(results: Dict, output_file: str, format: str = 'json'):
     """
     Зберегти результати в JSON або YAML
@@ -116,15 +143,19 @@ def save_results(results: Dict, output_file: str, format: str = 'json'):
     """
     
     ensure_file_dir(output_file)
-    
+
+    # Захист від TypeError: результати експериментів містять set/numpy-типи,
+    # які json (і pyyaml з ними) не вміють писати напряму.
+    safe_results = make_json_safe(results)
+
     try:
         if format == 'json':
             with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
-        
+                json.dump(safe_results, f, indent=2, ensure_ascii=False)
+
         elif format == 'yaml':
             with open(output_file, 'w', encoding='utf-8') as f:
-                yaml.dump(results, f, default_flow_style=False, allow_unicode=True)
+                yaml.dump(safe_results, f, default_flow_style=False, allow_unicode=True)
         
         else:
             raise ValueError(f"Невідомий формат: {format}")
