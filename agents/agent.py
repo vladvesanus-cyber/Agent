@@ -1,58 +1,87 @@
-"""
-AdaptiveHeightAgent - розумний агент що вчиться без знання про карту
-"""
-
+import heapq
 import numpy as np
 import random
 from typing import Dict
 
 
 class AdaptiveHeightAgent:
-    """
-    Агент що адаптивно дослідує невідому територію
-    Не знає розміри карти - вчиться на основі сенсорів і колізій
-    """
     
-    def __init__(self):
-        self.boundary_cells = set()  # Клітини де дрон ударився або виявив границю
-        self.safe_directions = {}     # Напрямки що не приводили до колізій
+    def __init__(self, success_threshold: float = 0.6,
+                 cool_on: float = 40.0, cool_off: float = 35.0):
+        self.boundary_cells = set()  # Cells where dorne find boundary
+        self.safe_directions = {}     # Directions without hits
         self.stuck_count = 0
         self.last_position = None
+
+        # ---- memory built ONLY from percepts (local windows) ----
+        self.known = {}               # (x, y) -> terrain code seen so far
+        self.success_threshold = success_threshold
+        self.cool_on = cool_on        # battery temp (C) where hovering starts
+        self.cool_off = cool_off      # battery temp (C) where flying resumes
+        self.cooling = False
+        # ---- learned energy model (from observed battery drops) ----
+        self.energy_per_step = 1.0    # EMA of battery units used per moving step
+        self._last_battery = None
+        self._last_was_move = False
     
     def decide(self, observation: Dict) -> Dict:
         """
-        Розпізнати та повернути дію
-        
-        Режими:
-        1. ДОСЛІДЖЕННЯ (батарея > 30%) - нормально розглядаємо карту
-        2. ПОВЕРНЕННЯ ДОДОМУ (батарея < 30%) - агресивно летимо домой
+        Modes:
+        1. EXPLORATION (battery > 30%) - normal exploration
+        2. RETURN HOME (battery < 30%) - aggressive flight to home
         """
         
         try:
+            self._update_known_map(observation)
             situation = self._analyze_situation(observation)
-            
-            # ===== ВИЗНАЧИТИ РЕЖИМ =====
+
+            # --- thermal protection: hover (zero energy) until battery cools ---
+            temp = situation['battery_temp']
+            if temp >= self.cool_on:
+                self.cooling = True
+            elif temp <= self.cool_off:
+                self.cooling = False
+            x, y, z = observation['position']
+            c = situation['local_map'].shape[0] // 2
+            under_tree = int(situation['local_map'][c, c]) == 2
+            if self.cooling and not under_tree:
+                self.last_position = observation['position']
+                self._last_was_move = False
+                return {'move': (0, 0, 0), 'altitude': max(z, 2.0)}
+
+            # learn how expensive one move is on this map/drone
             battery = situation['battery']
-            home_mode = battery < 30  # ← РЕЖИМ ПОВЕРНЕННЯ ДОДОМУ
+            if self._last_battery is not None and self._last_was_move:
+                drop = self._last_battery - battery
+                if 0 < drop < 20:
+                    self.energy_per_step = 0.9 * self.energy_per_step + 0.1 * drop
+            self._last_battery = battery
+
+            # return home when remaining energy barely covers the way back
+            # (distance * learned cost * safety factor + reserve) OR goal reached
+            dist_home = (abs(x - observation['home_position'][0]) +
+                         abs(y - observation['home_position'][1]))
+            need = max(15.0, self.energy_per_step * dist_home * 1.4 + 12.0)
+            home_mode = (battery < need or
+                         observation['exploration_ratio'] > self.success_threshold)
             
-            # ===== ОБРАТИ ВИСОТУ =====
+            # decide altitude
             if home_mode:
-                # На поверненні - низька висота для економії
+                # for returning
                 optimal_altitude = 2.0
             else:
-                # Нормальне дослідження
                 optimal_altitude = self._choose_altitude(situation)
             
-            # ===== ОБРАТИ НАПРЯМОК =====
+            # Chose direction
             if home_mode:
-                # Летимо ДОДОМУ для перезарядки (огинаючи перешкоди!)
+                # Go home
                 next_move = self._go_home_direction(observation, situation)
             else:
-                # Нормальне дослідження
                 next_move = self._choose_direction(observation, situation)
             
             self.last_position = observation['position']
-            
+            self._last_was_move = True
+
             return {
                 'move': next_move,
                 'altitude': optimal_altitude
@@ -63,36 +92,35 @@ class AdaptiveHeightAgent:
             raise
     
     def _analyze_situation(self, observation: Dict) -> Dict:
-        """Проаналізувати ситуацію"""
         
         health = observation['health']
         position = observation['position']
         local_map = observation['local_map']
         
-        # ===== БАТАРЕЯ =====
+        # Battery
         battery = health['battery']['charge_percent']
         battery_temp = health['battery']['temperature']
         
-        # ===== МОТОРИ =====
+        # Motors
         motors = health['motors']
         motor_health = np.mean([m['efficiency'] for m in motors])
         motor_temp = np.mean([m['temperature'] for m in motors])
         
-        # ===== ДАТЧИКИ =====
+        # Sensors
         sensors = health['sensors']
         sensor_accuracy = np.mean([s['accuracy'] for s in sensors])
         sensor_dirt = np.mean([s['dirt_level'] for s in sensors])
         
-        # ===== СТРУКТУРА =====
+        # Structure
         structure = health['structure']
         integrity = structure['integrity']
         is_flightworthy = structure['is_flightworthy']
         
-        # ===== ЗАГАЛЬНЕ ЗДОРОВ'Я =====
+        # Health
         overall_health = health['overall_health']
         critical_alerts = health['critical_alerts']
         
-        # ===== АНАЛІЗ ЛОКАЛЬНОЇ КАРТИ =====
+        # analize
         local_obs = self._analyze_local_map(local_map, position)
         
         situation = {
@@ -119,18 +147,17 @@ class AdaptiveHeightAgent:
     
     def _analyze_local_map(self, local_map: np.ndarray, position: tuple) -> Dict:
         """
-        Проаналізувати локальну карту
-        -1 = границя карти!
+        -1 is boundary
         """
         
         has_water_below = False
         has_obstacles_around = False
         has_trees_around = False
-        boundary_directions = []  # Напрямки на границю
+        boundary_directions = []  # Directions to boundary cells
         
         center = local_map.shape[0] // 2
         
-        # Перевіряємо всю локальну карту
+        # Analyze local map
         for dy in range(-center, center+1):
             for dx in range(-center, center+1):
                 y = center + dy
@@ -139,19 +166,19 @@ class AdaptiveHeightAgent:
                 if 0 <= y < local_map.shape[0] and 0 <= x < local_map.shape[1]:
                     cell = local_map[y, x]
                     
-                    # ===== ГРАНИЦЯ КАРТИ =====
+                    # Check for boundary
                     if cell == -1:
-                        if dx != 0 or dy != 0:  # Не в центрі
+                        if dx != 0 or dy != 0:  # Not the center cell
                             boundary_directions.append((dx, dy))
                         continue
                     
                     cell = int(cell)
                     
-                    # ===== ВОДА НИЖЧЕ =====
+                    # Check for water below
                     if cell == 3 and dy == 0 and dx == 0:
                         has_water_below = True
                     
-                    # ===== ПЕРЕШКОДИ =====
+                    # Check for obstacles and trees around
                     if cell == 1:  # OBSTACLE
                         has_obstacles_around = True
                     if cell == 2:  # TREE
@@ -166,60 +193,47 @@ class AdaptiveHeightAgent:
         }
     
     def _choose_altitude(self, situation: Dict) -> float:
-        """Вибрати оптимальну висоту для АКТИВНОГО ДОСЛІДЖЕННЯ"""
+        """Choose altitude"""
         
         local_obs = situation['local_obstacles']
         battery = situation['battery']
         sensor_dirt = situation['sensor_dirt']
         overall_health = situation['overall_health']
         
-        # ===== КРИТИЧНІ УМОВИ =====
+        # Critical condition
         if overall_health < 30 or not situation['is_flightworthy']:
             return 0.0
         
-        # ===== ВОДА НИЖЧЕ =====
+        # If has water
         if local_obs['has_water_below']:
             return 8.0  # Достатньо щоб уникнути води
         
-        # ===== ДАТЧИКИ ЗАБРУДНЕНІ =====
+        # state of sensors
         if sensor_dirt > 60:
             return 9.0
         elif sensor_dirt > 40:
             return 7.0
         
-        # ===== БАТАРЕЯ КРИТИЧНА =====
+        # battery is critical low
         if battery < 15:
             return 1.0  # Мінімальна висота
         
-        # ===== БАТАРЕЯ НИЗЬКА =====
+        # battery is low
         if battery < 30:
             return 3.0  # Економна висота
         
-        # ===== МОТОРИ ГАРЯЧІ =====
+        # tempreture of motors
         if situation['motor_temp'] > 60:
-            return 10.0  # Охолодження
+            return 10.0  # Cool down
         elif situation['motor_temp'] > 50:
             return 8.0
         
-        # ===== АКТИВНЕ ДОСЛІДЖЕННЯ З ДЕРЕВАМИ =====
-        # Літати ВИЩЕ щоб переходити через дерева
         if local_obs['has_trees_around']:
-            return 6.5  # ← Вище, щоб пройти мимо деревьев
+            return 6.5
         
-        # ===== НОРМАЛЬНЕ ДОСЛІДЖЕННЯ =====
-        # Літати помірно високо для кращої видимості
         return 6.0
     
     def _choose_direction(self, observation: Dict, situation: Dict) -> tuple:
-        """
-        Вибрати напрямок руху - РОЗУМНА СТРАТЕГІЯ
-        
-        ПРІОРИТЕТИ:
-        1. Нові клітини БЕЗ перешкод (безпечні) ← МАКСИМУМ
-        2. Відвідані БЕЗ перешкод (для різноманітності)
-        3. Нові клітини ЧЕРЕЗ дерева ← АГРЕСИВНО ЛИШЕ ЯК КРАЙНІЙ ЗАСІБ
-        4. Відвідані через дерева (останній засіб)
-        """
         
         position = observation['position']
         visited_cells = observation['visited_cells']
@@ -229,26 +243,26 @@ class AdaptiveHeightAgent:
         if not isinstance(visited_cells, set):
             visited_cells = set()
         
-        # ===== ЕКСТРЕНА УМОВА =====
+        # Critical situation
         if situation['overall_health'] < 20 or situation['battery'] < 5:
             return self._go_away_direction(position)
         
-        # ===== ВСІ НАПРЯМКИ =====
+        # all directions
         directions = [
-            (1, 0, 0),    # Вправо
-            (-1, 0, 0),   # Вліво
-            (0, 1, 0),    # Вниз
-            (0, -1, 0),   # Вгору
+            (1, 0, 0),    # Right
+            (-1, 0, 0),   # Left
+            (0, 1, 0),    # Down
+            (0, -1, 0),   # Up
         ]
         
         center = local_map.shape[0] // 2
         altitude = situation['current_altitude']
         
-        # ===== КАТЕГОРИЗУВАТИ НАПРЯМКИ =====
-        safe_new = []         # ПРІОРИТЕТ 1: Нові БЕЗПЕЧНІ клітини
-        safe_old = []         # ПРІОРИТЕТ 2: Старі БЕЗПЕЧНІ клітини
-        risky_new = []        # ПРІОРИТЕТ 3: Нові РИЗИКОВАНІ (дерева)
-        risky_old = []        # ПРІОРИТЕТ 4: Старі РИЗИКОВАНІ
+        # category of directions
+        safe_new = []         
+        safe_old = []        
+        risky_new = []        
+        risky_old = []        
         
         for dx, dy, dz in directions:
             local_x = center + dx
@@ -257,79 +271,71 @@ class AdaptiveHeightAgent:
             if 0 <= local_x < local_map.shape[1] and 0 <= local_y < local_map.shape[0]:
                 cell_value = local_map[local_y, local_x]
                 
-                # ===== ГРАНИЦЯ КАРТИ - ЗАБОРОНЬЕНО =====
+                # boundary
                 if cell_value == -1:
                     continue
                 
                 cell_int = int(cell_value)
                 
-                # ===== ВИЗНАЧИТИ ЧИ БЕЗПЕЧНО =====
                 is_safe = False
                 if cell_int == 0:  # FREE
                     is_safe = True
-                elif cell_int == 3 and altitude >= 5:  # WATER на висоті
+                elif cell_int == 1 and altitude > 1:  # OBSTACLE вище 1м
+                    is_safe = True
+                elif cell_int == 3 and altitude > 1:  # WATER вище 1м
                     is_safe = True
                 
-                # ===== ВИЗНАЧИТИ ЧИ НОВА КЛІТИНА =====
+                # decide if cell is new
                 new_x = position[0] + dx
                 new_y = position[1] + dy
                 cell_coord = (int(new_x), int(new_y))
                 is_new = cell_coord not in visited_cells
                 
-                # ===== РОЗПОДІЛИТИ ПО КАТЕГОРІЯМ =====
+                # divide in category
                 if is_safe:
                     if is_new:
                         safe_new.append((dx, dy, dz))
                     else:
                         safe_old.append((dx, dy, dz))
                 else:
-                    # Ризиковано - через дерева
-                    if cell_int == 2 and altitude >= 2:  # TREE на висоті
+                    if cell_int == 2 and altitude >= 2:
                         if is_new:
                             risky_new.append((dx, dy, dz))
                         else:
                             risky_old.append((dx, dy, dz))
         
-        # ===== ВИБРАТИ ПО ПРІОРИТЕТУ =====
-        
-        # ПРІОРИТЕТ 1: Нові БЕЗПЕЧНІ клітини ← МАКСИМУМ ПРІОРИТЕТУ
         if safe_new:
             best_direction = random.choice(safe_new)
             return best_direction
         
-        # ПРІОРИТЕТ 2: Старі БЕЗПЕЧНІ (для різноманітності, коли нема нових)
-        if safe_old:
-            best_direction = random.choice(safe_old)
-            return best_direction
         frontier_move = self._move_toward_exploration_frontier(
             position,
-            visited_cells,
-            local_map,
+            visited_cells
         )
 
         if frontier_move is not None:
             return frontier_move
-        # ПРІОРИТЕТ 3: Нові ЧЕРЕЗ ДЕРЕВА (агресивно, але лише якщо нема альтернативи!)
+
+        if safe_old:
+            best_direction = random.choice(safe_old)
+            return best_direction
+
         if risky_new:
-            print(f"   ⚠️  АГРЕСИВНО: Немає безпечних нових клеток! Летимо через дерева...")
             best_direction = random.choice(risky_new)
             return best_direction
         
-        # ПРІОРИТЕТ 4: Старі ЧЕРЕЗ ДЕРЕВА (останній засіб)
         if risky_old:
-            print(f"   ⚠️⚠️  КРИТИЧНА СИТУАЦІЯ: Летимо через дерева у старих місцях...")
             best_direction = random.choice(risky_old)
             return best_direction
         
-        # ПРІОРИТЕТ 5: Нічого не залишилось - відійти від границі
-        return self._go_away_from_boundary(position, local_obs, local_map)
+        return self._go_away_from_boundary(local_map)
     
-    def _go_away_from_boundary(self, position: tuple, local_obs: Dict, local_map: np.ndarray) -> tuple:
-        """Рухатись ВІД найближчої границі"""
+    @staticmethod
+    def _go_away_from_boundary(local_map: np.ndarray) -> tuple:
         
         center = local_map.shape[0] // 2
         
-        # Знайти напрямки без границь
+        # find direction withou boundary
         safe_directions = []
         
         for dx in [-1, 0, 1]:
@@ -349,11 +355,9 @@ class AdaptiveHeightAgent:
         if safe_directions:
             return random.choice(safe_directions)
         else:
-            # Останній засіб - літати вгору
             return (0, 0, 1)
     
     def _go_away_direction(self, position: tuple) -> tuple:
-        """Напрямок ВІД границі - випадковий"""
         
         directions = [
             (1, 0, 0),
@@ -365,16 +369,6 @@ class AdaptiveHeightAgent:
         return random.choice(directions)
     
     def _go_home_direction(self, observation: Dict, situation: Dict) -> tuple:
-        """
-        Напрямок ДОДОМУ (на базу для перезарядки) - ОГИНАЄ ПЕРЕШКОДИ.
-
-        Раніше цей метод просто летів прямо на (15, 15), ігноруючи
-        local_map - через це дрон міг врізатись у перешкоду/дерево на
-        шляху додому і розбитись, замість долетіти і перезарядитись.
-        Тепер він, як і _choose_direction, дивиться на vnemy (local_map)
-        і з безпечних напрямків обирає той, що найбільше наближає
-        до справжньої домашньої позиції (observation['home_position']).
-        """
         position = observation['position']
         x, y, z = position
         home_x, home_y = observation.get('home_position', (x, y))
@@ -389,7 +383,11 @@ class AdaptiveHeightAgent:
             (0, -1, 0),
         ]
 
-        safe_candidates = []  # (нова_дистанція_до_дому, напрямок)
+        planned = self._plan_step(position, lambda c: c == (home_x, home_y), altitude)
+        if planned is not None:
+            return planned
+
+        safe_candidates = []  # (new distance to home, direction)
 
         for dx, dy, dz in directions:
             local_x = center + dx
@@ -399,22 +397,16 @@ class AdaptiveHeightAgent:
                 continue
 
             cell_value = local_map[local_y, local_x]
-            if cell_value == -1:  # границя карти
+            if cell_value == -1:  # boundary of map
                 continue
 
             cell_int = int(cell_value)
 
-            # ===== БЕЗПЕКА - ВІДПОВІДНО ДО СПРАВЖНЬОЇ ФІЗИКИ environment.py =====
-            # environment.detect_collision(): на висоті z <= 1 блокує ВСЕ
-            # (перешкода/вода/гора/дерево). На висоті z > 1 перешкода/вода/гора
-            # взагалі НЕ становлять загрози - ризик лишається тільки у дерев
-            # (гілки, ймовірнісно). Раніше тут перешкода вважалась небезпечною
-            # на будь-якій висоті - через це дрон на шляху додому міг
-            # "вважати" прохідну клітину заблокованою і застрягати, гойдаючись
-            # між двома клітинками замість летіти далі.
-            if cell_int == 0:  # FREE
+            if cell_int == 0:
                 is_safe = True
-            elif altitude > 1:  # вище 1м - перешкода/вода/гора/дерево прохідні
+            elif cell_int == 4:
+                is_safe = False
+            elif altitude > 1:
                 is_safe = True
             else:
                 is_safe = False
@@ -426,11 +418,11 @@ class AdaptiveHeightAgent:
             safe_candidates.append((new_distance, (dx, dy, dz)))
 
         if safe_candidates:
-            # Обрати напрямок, що найбільше наближає до дому
+            # choose best home direction
             safe_candidates.sort(key=lambda c: c[0])
             return safe_candidates[0][1]
 
-        # ===== НІЧОГО БЕЗПЕЧНОГО В БІК ДОМУ - ХОЧ БИ РУХАТИСЬ =====
+        # choose even danger direction
         for dx, dy, dz in directions:
             local_x = center + dx
             local_y = center + dy
@@ -438,54 +430,65 @@ class AdaptiveHeightAgent:
                     and local_map[local_y, local_x] != -1):
                 return (dx, dy, dz)
 
-        # ===== ОСТАННІЙ ЗАСІБ - ПІДНЯТИСЬ ВИЩЕ =====
+        # or increse altitude
         return (0, 0, 1)
+
+    # ------------------------------------------------------------------
+    # memory + path planning on the map the agent has SEEN (no env access)
+    # ------------------------------------------------------------------
+    def _update_known_map(self, observation: Dict):
+        lm = observation['local_map']
+        x0, y0 = int(observation['position'][0]), int(observation['position'][1])
+        r = lm.shape[0] // 2
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                v = lm[dy + r, dx + r]
+                if v != -1:
+                    self.known[(x0 + dx, y0 + dy)] = int(v)
+
+    def _cell_cost(self, cell, altitude):
+        """Cost of entering a known cell, None if impassable."""
+        t = self.known.get(cell)
+        if t is None or t == 4:            # unknown or mountain
+            return None
+        if t == 0:
+            return 1
+        if altitude <= 1:                  # obstacle/water/tree block at low altitude
+            return None
+        return 5 if t == 2 else 1          # tree = 30 % crash risk -> expensive
+
+    def _plan_step(self, position, is_goal, altitude):
+        """Dijkstra over known cells; returns first step (dx, dy, 0) or None."""
+        start = (int(position[0]), int(position[1]))
+        alt = max(altitude, 2.0)           # we always fly >= 2 m when moving on
+        pq = [(0, start, None)]
+        best = {start: 0}
+        while pq:
+            d, cell, first = heapq.heappop(pq)
+            if d > best.get(cell, 1e9):
+                continue
+            if cell != start and is_goal(cell):
+                return first
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nxt = (cell[0] + dx, cell[1] + dy)
+                c = self._cell_cost(nxt, alt)
+                if c is None:
+                    continue
+                nd = d + c
+                if nd < best.get(nxt, 1e9):
+                    best[nxt] = nd
+                    heapq.heappush(pq, (nd, nxt, first or (dx, dy, 0)))
+        return None
 
     def _move_toward_exploration_frontier(
         self,
         position: tuple,
-        visited_cells: set,
-        local_map: np.ndarray,
+        visited_cells: set
     ):
-        """
-        Move toward an unvisited cell adjacent to the explored frontier.
-        """
-
-        directions = [
-            (1, 0, 0),
-            (-1, 0, 0),
-            (0, 1, 0),
-            (0, -1, 0),
-        ]
-
-        candidates = []
-
-        for visited_x, visited_y in visited_cells:
-            for dx, dy, dz in directions:
-                target = (
-                    visited_x + dx,
-                    visited_y + dy,
-                )
-
-                if target in visited_cells:
-                    continue
-
-                distance = (
-                    abs(target[0] - position[0])
-                    + abs(target[1] - position[1])
-                )
-
-                candidates.append(
-                    (
-                        distance,
-                        target,
-                        (dx, dy, dz),
-                    )
-                )
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda item: item[0])
-
-        return candidates[0][2]
+        """Shortest known path from the CURRENT position to the nearest
+        known-but-unvisited cell."""
+        return self._plan_step(
+            position,
+            lambda c: c in self.known and c not in visited_cells,
+            position[2],
+        )

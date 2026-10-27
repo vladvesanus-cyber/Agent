@@ -1,7 +1,3 @@
-"""
-Drone module: всі компоненти дрона та сам дрон
-"""
-
 from .State import Battery, Motors, Sensors, Structure
 from .HealthMonitor import HealthMonitor
 from .drone import Drone

@@ -1,7 +1,3 @@
-"""
-Tests module: тести компонентів та метрики
-"""
-
 from .metrics import Metrics, Statistics, DataLogger
 
 __all__ = [

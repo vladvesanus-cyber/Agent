@@ -1,11 +1,3 @@
-"""
-Application entry point for the drone simulation.
-
-За замовчуванням запускає ПОВНИЙ експеримент: усі конфігурації з
-config/experiments.yaml (easy/medium/hard), по 20 прогонів кожна (різні
-seeds), агрегує статистику (mean/std) і зберігає все - і сирі результати
-кожного прогону, і агреговану статистику - у JSON-файл у results/.
-"""
 
 import argparse
 import sys
@@ -21,12 +13,10 @@ def run_tests() -> int:
 
     return pytest.main(["tests", "-q"])
 
-
-# Фабрики - кожен прогін ExperimentRunner отримує НОВИЙ інстанс агента
-# (не один спільний об'єкт, який би тягнув стан з попереднього прогону).
 AGENT_FACTORIES = {
     "adaptive": AdaptiveHeightAgent,
-    "baseline": lambda: BoustrophedonAgent(cruise_altitude=6.0),
+    "baseline": lambda: BoustrophedonAgent(cruise_altitude=0.0),
+    "baseline6": lambda: BoustrophedonAgent(cruise_altitude=6.0),  # fairer baseline (6 m, scan 100 %)
 }
 
 
@@ -44,7 +34,7 @@ def main(argv=None):
 
     parser.add_argument(
         "--agent",
-        choices=["adaptive", "baseline", "both"],
+        choices=["adaptive", "baseline", "baseline6", "both", "all"],
         default="both",
         help="Який агент(и) тестувати; 'both' порівнює власного агента "
              "з базовим у ТИХ САМИХ умовах (default: both)",
@@ -77,6 +67,8 @@ def main(argv=None):
 
     selected_agents = (
         AGENT_FACTORIES.items()
+        if args.agent == "all"
+        else [(n, AGENT_FACTORIES[n]) for n in ("adaptive", "baseline")]
         if args.agent == "both"
         else [(args.agent, AGENT_FACTORIES[args.agent])]
     )
@@ -85,9 +77,6 @@ def main(argv=None):
     all_summaries = {}
 
     for agent_name, agent_factory in selected_agents:
-        print(f"\n{'#'*70}")
-        print(f"# АГЕНТ: {agent_name}")
-        print(f"{'#'*70}")
 
         runner = ExperimentRunner(agent_factory, max_steps_override=args.max_steps)
         runner.run_full_experiment(only_config=args.config)
@@ -95,11 +84,7 @@ def main(argv=None):
         all_results[agent_name] = runner.results
         all_summaries[agent_name] = runner.summary
 
-    # ===== ПІДСУМКОВЕ ПОРІВНЯННЯ (якщо тестували обох агентів) =====
     if len(all_summaries) > 1:
-        print(f"\n{'='*70}")
-        print("📊 ПОРІВНЯННЯ АГЕНТІВ (середнє ± стандартне відхилення)")
-        print(f"{'='*70}")
         configs = sorted({c for s in all_summaries.values() for c in s})
         for config_name in configs:
             print(f"\n[{config_name}]")
@@ -108,17 +93,16 @@ def main(argv=None):
                     continue
                 s = summaries[config_name]
                 print(f"  {agent_name:>10}: "
-                      f"експлорація {s['exploration_percent']['mean']:5.1f}% "
+                      f"exploration {s['exploration_percent']['mean']:5.1f}% "
                       f"± {s['exploration_percent']['std']:.1f}%, "
-                      f"успіх {s['mission_success_rate']*100:.0f}%, "
-                      f"колізій {s['collision_count']['mean']:.2f}")
+                      f"success {s['mission_success_rate']*100:.0f}%, "
+                      f"collision {s['collision_count']['mean']:.2f}")
 
-    # ===== ЗБЕРЕЖЕННЯ РЕЗУЛЬТАТІВ НА ДИСК =====
     output_path = args.output or f"results/experiment_{get_timestamp_filename()}.json"
     save_results(
         {
-            "results": all_results,     # сирі результати кожного прогону (зберігає "perебіг" кожного запуску)
-            "summary": all_summaries,    # агреговане mean/std/min/max по кожній конфігурації
+            "results": all_results,     
+            "summary": all_summaries, 
         },
         output_path,
         format="json",

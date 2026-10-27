@@ -1,7 +1,3 @@
-"""
-Environment module: тільки DroneEnvironment з вбудованим CollisionDetector
-"""
-
 from .environment import DroneEnvironment, Terrain
 
 __all__ = [

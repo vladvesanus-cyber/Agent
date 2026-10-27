@@ -1,7 +1,3 @@
-"""
-Agent module: AdaptiveHeightAgent
-"""
-
 from .agent import AdaptiveHeightAgent
 from .baseline import BoustrophedonAgent
 

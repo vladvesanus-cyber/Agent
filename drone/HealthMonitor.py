@@ -1,15 +1,10 @@
-"""
-HealthMonitor - моніторинг здоров'я дрона
-"""
-
-import numpy as np
-from typing import List, Dict
+from typing import List
 
 
 class HealthMonitor:
     """
-    Слідкує за здоров'ям дрона
-    Оновлює стан на основі параметрів
+    Follow the health of drone
+    Update state according to paramaters
     """
     
     def __init__(self, battery, motors, sensors, structure):
@@ -35,19 +30,8 @@ class HealthMonitor:
                collision_occurred: bool = False,
                collision_damage: float = 0.0,
                ambient_temp: float = 25.0):
-        """
-        Оновити здоров'я дрона
         
-        Args:
-            energy_consumed: % енергії витрачено
-            motor_stress: Стрес на кожний мотор [0-1]
-            altitude: Висота дрона (м)
-            collision_occurred: Чи була колізія?
-            collision_damage: Сила пошкодження (0-1)
-            ambient_temp: Температура довкілля (°C)
-        """
-        
-        # Записати останнє оновлення
+        # Write last update
         self.last_update = {
             'energy_consumed': energy_consumed,
             'motor_stress': motor_stress,
@@ -57,23 +41,23 @@ class HealthMonitor:
             'ambient_temp': ambient_temp
         }
         
-        # ===== БАТАРЕЯ =====
+        # Battery
         self._update_battery(energy_consumed, ambient_temp)
         
-        # ===== МОТОРИ =====
+        # Motors
         self._update_motors(motor_stress, altitude, ambient_temp)
         
-        # ===== ДАТЧИКИ =====
+        # sensors
         self._update_sensors(altitude, collision_occurred, collision_damage)
         
-        # ===== СТРУКТУРА - ПОШКОДЖЕННЯ ВІД КОЛІЗІЇ =====
+        # structure
         if collision_occurred and collision_damage > 0:
             self._apply_collision_damage(collision_damage)
         
-        # ===== ЗАГАЛЬНЕ ЗДОРОВ'Я =====
+        # health
         self._calculate_overall_health()
     
-    # ===== БАТАРЕЯ =====
+    #Battery
     
     def _update_battery(
         self,
@@ -99,39 +83,37 @@ class HealthMonitor:
 
         self.battery.update_health()
     
-    # ===== МОТОРИ =====
+    # motors
     
     def _update_motors(self, motor_stress: List[float], altitude: float, ambient_temp: float):
-        """Оновити мотори"""
+        """Update motors"""
         
         for i, stress in enumerate(motor_stress):
-            # Застосувати стрес
+            # apply stress
             self.motors.apply_stress(i, stress)
             
-            # Охолоджування на висоті гірше
+            # cool down worse in hight
             motor = self.motors.motors[i]
             altitude_factor = 1 + (altitude / 20) * 0.3
             
             cooling = (motor['temperature'] - ambient_temp) * 0.03 / altitude_factor
             motor['temperature'] = max(ambient_temp, motor['temperature'] - cooling)
         
-        # Оновити температури
+        # update temperature
         self.motors.update_temperatures()
     
-    # ===== ДАТЧИКИ =====
+    # sensors
     
     def _update_sensors(self, altitude: float, 
                        collision_occurred: bool, 
                        collision_damage: float):
-        """Оновити датчики"""
         
         for i, sensor in enumerate(self.sensors.sensors):
-            # Пил на низькій висоті
+            # Dirt on low altitude
             if altitude <= 5:
                 dust_factor = (5 - altitude) * 0.2
                 self.sensors.apply_dirt(i, dust_factor * 0.1)
             
-            # Забруднення від колізії
             if collision_occurred and collision_damage > 0:
                 if sensor['type'] == 'camera':
                     dirt_amount = collision_damage * 20
@@ -140,47 +122,44 @@ class HealthMonitor:
                 
                 self.sensors.apply_dirt(i, dirt_amount)
     
-    # ===== СТРУКТУРА =====
+    # Structure
     
     def _apply_collision_damage(self, collision_damage: float):
-        """Застосувати пошкодження від колізії"""
         
-        # Розподілити пошкодження на компоненти
+        # Divide damage to components
         propeller_damage = collision_damage * 30
         frame_damage = collision_damage * 20
         sensor_dirt = collision_damage * 25
         motor_stress_amount = collision_damage * 15
         thermal_stress = collision_damage * 10
         
-        # Пошкодити пропелери
+        # Damage propellers
         for i in range(self.structure.num_propellers):
             self.structure.propeller_health[i] = max(
                 0, 
                 self.structure.propeller_health[i] - propeller_damage
             )
         
-        # Пошкодити раму
+        # Damage structure
         self.structure.integrity = max(0, self.structure.integrity - frame_damage)
         
-        # Забруднити датчики
+        # Apply dirt
         for i in range(len(self.sensors.sensors)):
             self.sensors.apply_dirt(i, sensor_dirt)
         
-        # Стрес на мотори
+        # Apply stress on motors
         for i in range(len(self.motors.motors)):
             self.motors.motors[i]['wear'] += motor_stress_amount
         
-        # Тепловий стрес батареї
+        # Temperature stress
         self.battery.apply_thermal_stress(thermal_stress)
         
-        # Записати в статистику
+        # increase crash count
         self.structure.crash_count += 1
     
-    # ===== ЗАГАЛЬНЕ ЗДОРОВ'Я =====
+    # Health
     
     def _calculate_overall_health(self):
-        """Розрахувати загальне здоров'я"""
-        
         battery_health = self.battery.health
         motor_health = self.motors.get_average_efficiency()
         sensor_health = self.sensors.get_average_accuracy()
@@ -196,48 +175,42 @@ class HealthMonitor:
         self.health_history.append(overall)
     
     def get_overall_health(self) -> float:
-        """Отримати поточне здоров'я (0-100)"""
         return self.health_history[-1] if self.health_history else 100.0
     
     def is_system_healthy(self) -> bool:
-        """Чи система здорова?"""
         return (
             self.battery.is_healthy() and
             self.structure.is_flightworthy()
         )
     
     def get_critical_alerts(self) -> List[str]:
-        """Отримати список критичних проблем"""
         alerts = []
         
-        # Батарея
+        # Battery
         if self.battery.temperature > 50:
-            alerts.append("🔥 БАТАРЕЯ ПЕРЕГРІТА!")
+            alerts.append("🔥 BATTERY OVERHEATED!")
         
         if self.battery.charge < 10:
-            alerts.append("🔴 БАТАРЕЯ КРИТИЧНА!")
+            alerts.append("🔴 BATTERY CRITICAL!")
         
-        # Мотори
+        # Motors
         if any(m['temperature'] > 70 for m in self.motors.motors):
-            alerts.append("🔥 МОТОРИ ПЕРЕГРІТІ!")
+            alerts.append("🔥 MOTORS OVERHEATED!")
         
-        # Структура
+        # Structure
         if not self.structure.is_flightworthy():
-            alerts.append("❌ ДРОН НЕ ПРИДАТНИЙ ДО ПОЛЬОТУ!")
+            alerts.append("❌ DRONE NOT FLIGHT-WORTHY!")
         
         if self.structure.integrity < 30:
-            alerts.append("💥 СТРУКТУРА КРИТИЧНА!")
+            alerts.append("💥 STRUCTURE CRITICAL!")
         
-        # Загальне здоров'я
+        # Overall Health
         if self.get_overall_health() < 40:
-            alerts.append("🚨 ЗАГАЛЬНЕ ЗДОРОВ'Я КРИТИЧНЕ!")
+            alerts.append("🚨 OVERALL HEALTH CRITICAL!")
         
         return alerts
     
     def reset(self):
-        """
-        RESET HealthMonitor на початковий стан
-        """
         
         self.health_history = []
         self.last_update = {
@@ -248,7 +221,5 @@ class HealthMonitor:
             'collision_damage': 0,
             'ambient_temp': 25
         }
-        
-        # Переінціалізувати здоров'я
         initial_health = (100 * 0.3 + 100 * 0.3 + 90 * 0.2 + 100 * 0.2)
         self.health_history = [initial_health]
